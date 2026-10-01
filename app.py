@@ -278,7 +278,7 @@ class TodoWindow(QWidget):
         add_button = QPushButton("+")
         add_button.setFixedSize(30, 30)
         add_button.setToolTip("Add task")
-        add_button.clicked.connect(self.open_task_dialog)
+        add_button.clicked.connect(lambda: self.open_task_dialog())
         header.addWidget(add_button)
 
         more_button = QPushButton("•••")
