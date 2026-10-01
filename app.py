@@ -5,7 +5,7 @@ import sys
 from datetime import datetime, date
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt, QDate, QTime, QSettings, QTimer
+from PySide6.QtCore import QAbstractNativeEventFilter, QPoint, Qt, QDate, QTime, QSettings, QTimer
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDateEdit, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QMenu, QPushButton, QSlider, QSystemTrayIcon,
@@ -22,6 +22,11 @@ SETTINGS = QSettings("DeathKernel", "StickyTodo")
 
 user32 = ctypes.windll.user32
 DESKTOP_CLASSES = {"Progman", "WorkerW"}
+HOTKEY_ID = 0x53544943  # STIC
+WM_HOTKEY = 0x0312
+MOD_CONTROL = 0x0002
+MOD_SHIFT = 0x0004
+VK_SPACE = 0x20
 
 
 def window_class(hwnd):
@@ -35,6 +40,10 @@ def window_class(hwnd):
 class TodoWindow(QWidget):
     def __init__(self):
         super().__init__()
+        self.hotkey_filter = GlobalHotkeyFilter(self.quick_add)
+        QApplication.instance().installNativeEventFilter(self.hotkey_filter)
+        user32.RegisterHotKey(None, HOTKEY_ID, MOD_CONTROL | MOD_SHIFT, VK_SPACE)
+
         self.tasks = self.load()
         self.drag_pos = None
         self.desktop_only = True
@@ -88,6 +97,15 @@ class TodoWindow(QWidget):
             json.dumps(self.tasks, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+
+    def quick_add(self):
+        self.manual_hide = False
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.search.clear()
+        self.input.setFocus()
+        self.input.selectAll()
 
     def update_desktop_visibility(self):
         if not self.desktop_only:
@@ -460,7 +478,8 @@ class TodoWindow(QWidget):
                 changed = True
 
         if changed:
-            self.save()
+            user32.UnregisterHotKey(None, HOTKEY_ID)
+        self.save()
             self.render()
 
     def opacity_changed(self, value):
