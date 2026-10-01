@@ -9,7 +9,7 @@ from PySide6.QtCore import QAbstractNativeEventFilter, QPoint, Qt, QDate, QTime,
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDateEdit, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QMenu, QPushButton, QSlider, QSystemTrayIcon,
-    QTimeEdit, QVBoxLayout, QWidget, QStyle,
+    QTimeEdit, QVBoxLayout, QWidget, QStyle, QInputDialog,
 )
 
 try:
@@ -113,13 +113,18 @@ class TodoWindow(QWidget):
         )
 
     def quick_add(self):
-        self.manual_hide = False
-        self.show()
-        self.raise_()
-        self.activateWindow()
-        self.search.clear()
-        self.input.setFocus()
-        self.input.selectAll()
+        # Keep the main widget desktop-only. Quick Add uses a tiny transient
+        # dialog so the global shortcut also works while another app is open.
+        text, ok = QInputDialog.getText(
+            None,
+            "Sticky • Quick Add",
+            "Task:",
+            QLineEdit.Normal,
+            "",
+        )
+        if ok and text.strip():
+            self.input.setText(text.strip())
+            self.add_task()
 
     def update_desktop_visibility(self):
         if not self.desktop_only:
