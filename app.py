@@ -1,4 +1,5 @@
 import ctypes
+from ctypes import wintypes
 import json
 import signal
 import sys
