@@ -423,16 +423,12 @@ class TodoWindow(QWidget):
 
         category = QComboBox()
         category.addItems(CATEGORIES)
-        category.setCurrentText(
-            task.get("category", "Personal") if task else "Personal"
-        )
+        category.setCurrentText(task.get("category", "Personal") if task else "Personal")
         form.addRow("Category", category)
 
         priority = QComboBox()
         priority.addItems(PRIORITIES)
-        priority.setCurrentText(
-            task.get("priority", "Medium") if task else "Medium"
-        )
+        priority.setCurrentText(task.get("priority", "Medium") if task else "Medium")
         form.addRow("Priority", priority)
 
         due_enabled = QCheckBox("Set due date")
@@ -465,57 +461,61 @@ class TodoWindow(QWidget):
         buttons = QDialogButtonBox(
             QDialogButtonBox.Save | QDialogButtonBox.Cancel
         )
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
 
-        text.selectAll()
-        text.setFocus()
+        def save_form():
+            task_text = text.text().strip()
+            if not task_text:
+                QMessageBox.warning(
+                    dialog,
+                    "Missing task",
+                    "Enter a task name.",
+                )
+                text.setFocus()
+                return
 
-        if dialog.exec() != QDialog.Accepted:
-            return
+            due_value = (
+                due.date().toString("yyyy-MM-dd")
+                if due_enabled.isChecked()
+                else ""
+            )
+            reminder_time = reminder.time().toString("HH:mm")
+            reminder_value = (
+                f"{due_value} {reminder_time}"
+                if due_value and reminder_time != "00:00"
+                else ""
+            )
 
-        task_text = text.text().strip()
-        if not task_text:
-            QMessageBox.warning(dialog, "Missing task", "Enter a task name.")
-            return
-
-        due_value = (
-            due.date().toString("yyyy-MM-dd")
-            if due_enabled.isChecked()
-            else ""
-        )
-        reminder_time = reminder.time().toString("HH:mm")
-        reminder_value = (
-            f"{due_value} {reminder_time}"
-            if due_value and reminder_time != "00:00"
-            else ""
-        )
-
-        if editing:
-            task.update(
-                {
+            if editing:
+                task.update({
                     "text": task_text,
                     "category": category.currentText(),
                     "priority": priority.currentText(),
                     "due_date": due_value,
                     "reminder": reminder_value,
                     "notified": False,
-                }
-            )
-        else:
-            self.tasks.append(
-                new_task(
-                    task_text,
-                    category.currentText(),
-                    priority.currentText(),
-                    due_value,
-                    reminder_value,
+                })
+            else:
+                self.tasks.append(
+                    new_task(
+                        task_text,
+                        category.currentText(),
+                        priority.currentText(),
+                        due_value,
+                        reminder_value,
+                    )
                 )
-            )
 
-        self.save()
-        self.render()
+            self.save()
+            self.render()
+            dialog.accept()
+
+        buttons.button(QDialogButtonBox.Save).clicked.connect(save_form)
+        buttons.button(QDialogButtonBox.Cancel).clicked.connect(dialog.reject)
+
+        text.selectAll()
+        text.setFocus()
+        dialog.exec()
 
     def find_task(self, task_id):
         for task in self.tasks:
