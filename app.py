@@ -175,7 +175,6 @@ class TodoWindow(QWidget):
         self.resize(430, 570)
         self.raise_()
         self.activateWindow()
-        self.input.setFocus()
 
     def update_desktop_visibility(self):
         if not self.desktop_only:
@@ -502,6 +501,9 @@ class TodoWindow(QWidget):
         delete = menu.addAction("Delete")
         delete.triggered.connect(lambda: self.remove(idx))
         menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+
+    def add_task(self):
+        self.open_task_dialog()
 
     def toggle(self, idx, state):
         if 0 <= idx < len(self.tasks):
