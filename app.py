@@ -648,7 +648,7 @@ class TodoWindow(QWidget):
         self.render()
 
     def change_opacity_dialog(self):
-        current = int(SETTINGS.value("opacity", 96))
+        current = int(SETTINGS.value("opacity", 88))
         value, ok = QInputDialog.getInt(
             self,
             "Opacity",
@@ -1238,7 +1238,7 @@ class TodoWindow(QWidget):
             self.hide()
 
     def apply_opacity(self):
-        value = int(SETTINGS.value("opacity", 96))
+        value = int(SETTINGS.value("opacity", 88))
         value = max(55, min(100, value))
         self.setWindowOpacity(value / 100)
 
