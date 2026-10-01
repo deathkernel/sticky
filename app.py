@@ -77,7 +77,8 @@ class TodoWindow(QWidget):
                 task.setdefault("priority", "Medium")
                 task.setdefault("due_date", "")
                 task.setdefault("reminder", "")
-                task.setdefault("notified", False)\n                task.setdefault("category", "Personal")
+                task.setdefault("notified", False)
+                task.setdefault("category", "Personal")
             return data
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return []
