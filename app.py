@@ -37,6 +37,20 @@ def window_class(hwnd):
     return buffer.value
 
 
+class GlobalHotkeyFilter(QAbstractNativeEventFilter):
+    def __init__(self, callback):
+        super().__init__()
+        self.callback = callback
+
+    def nativeEventFilter(self, eventType, message):
+        if eventType in (b"windows_generic_MSG", b"windows_dispatcher_MSG"):
+            msg = wintypes.MSG.from_address(int(message))
+            if msg.message == WM_HOTKEY and msg.wParam == HOTKEY_ID:
+                self.callback()
+                return True, 0
+        return False, 0
+
+
 class TodoWindow(QWidget):
     def __init__(self):
         super().__init__()
