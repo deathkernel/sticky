@@ -1,5 +1,6 @@
 import ctypes
 import json
+import signal
 import sys
 from datetime import datetime, date
 from pathlib import Path
@@ -72,7 +73,6 @@ class TodoWindow(QWidget):
             data = json.loads(DATA.read_text(encoding="utf-8"))
             if not isinstance(data, list):
                 return []
-            # Normalize tasks created by older versions.
             for task in data:
                 task.setdefault("priority", "Medium")
                 task.setdefault("due_date", "")
@@ -209,16 +209,9 @@ class TodoWindow(QWidget):
 
         self.reminder = QTimeEdit()
         self.reminder.setDisplayFormat("HH:mm")
-        self.reminder.setTime(QTime.currentTime())
+        self.reminder.setTime(QTime(0, 0))
         self.reminder.setToolTip("Reminder time (today)")
         self.reminder.setSpecialValueText("No reminder")
-        self.reminder.setMinimumTime(QTime(0, 0))
-        self.reminder.setMaximumTime(QTime(23, 59))
-
-        no_reminder = QPushButton("No alarm")
-        no_reminder.setToolTip("Add task without a reminder")
-        no_reminder.clicked.connect(lambda: self.reminder.setProperty("enabled", False))
-        self.reminder.setProperty("enabled", False)
 
         options.addWidget(self.due_date, 2)
         options.addWidget(self.priority, 1)
@@ -267,9 +260,12 @@ class TodoWindow(QWidget):
         def sort_key(item):
             _, task = item
             due = task.get("due_date") or "9999-12-31"
-            # High priority first, then due date.
             priority_order = {"High": 0, "Medium": 1, "Low": 2}
-            return (0 if due == today else 1, due, priority_order.get(task.get("priority"), 1))
+            return (
+                0 if due == today else 1,
+                due,
+                priority_order.get(task.get("priority"), 1),
+            )
 
         pending.sort(key=sort_key)
         completed.sort(key=lambda item: item[1].get("due_date") or "9999-12-31")
@@ -358,8 +354,6 @@ class TodoWindow(QWidget):
 
         due = self.due_date.date().toString("yyyy-MM-dd")
         priority = self.priority.currentText()
-
-        # A reminder is enabled by setting the time field to a non-zero time.
         reminder_time = self.reminder.time().toString("HH:mm")
         reminder = "" if reminder_time == "00:00" else f"{due} {reminder_time}"
 
@@ -462,14 +456,27 @@ class TodoWindow(QWidget):
         super().mouseReleaseEvent(event)
 
 
+def request_quit():
+    """Gracefully stop the Qt event loop so Ctrl+C exits once."""
+    app.quit()
+
+
 app = QApplication(sys.argv)
 app.setQuitOnLastWindowClosed(False)
+
+# Qt's event loop can keep running after Python raises KeyboardInterrupt from
+# a timer callback. Handle Ctrl+C at the process level and ask Qt to exit.
+signal.signal(signal.SIGINT, lambda signum, frame: request_quit())
 
 window = TodoWindow()
 window.show()
 
 tray = QSystemTrayIcon(window)
 tray.setToolTip("Sticky Todo")
+
+# Give the tray icon an explicit icon to avoid the Qt warning and make the
+# tray entry visible on Windows even though Sticky currently has no .ico file.
+tray.setIcon(app.style().standardIcon(app.style().SP_ComputerIcon))
 
 menu = QMenu()
 show_action = menu.addAction("Show Sticky")
