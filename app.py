@@ -4,7 +4,9 @@ import json
 import signal
 import sys
 import uuid
-from datetime import datetime, date
+import re
+import shutil
+from datetime import datetime, date, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -15,6 +17,7 @@ from PySide6.QtCore import (
     QSettings,
     QTimer,
     Qt,
+    Signal,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -28,6 +31,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QFileDialog,
+    QPlainTextEdit,
     QLineEdit,
     QMenu,
     QMessageBox,
@@ -79,6 +84,8 @@ def new_task(
     tags="",
     notes="",
     pinned=False,
+    repeat="None",
+    subtasks=None,
 ):
     return {
         "id": uuid.uuid4().hex,
@@ -92,6 +99,8 @@ def new_task(
         "tags": tags,
         "notes": notes,
         "pinned": pinned,
+        "repeat": repeat,
+        "subtasks": list(subtasks or []),
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
 
@@ -114,6 +123,70 @@ class GlobalHotkeyFilter(QAbstractNativeEventFilter):
         return False, 0
 
 
+class TaskRow(QWidget):
+    dropped = Signal(str)
+
+    def __init__(self, owner, task):
+        super().__init__(owner)
+        self.owner = owner
+        self.task_id = task.get("id")
+        self.drag_start = None
+        self.setObjectName("taskRow")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 3, 5, 3)
+        layout.setSpacing(3)
+
+        self.box = QCheckBox(task.get("text", ""))
+        self.box.setChecked(bool(task.get("done")))
+        self.box.stateChanged.connect(
+            lambda state, tid=self.task_id: owner.toggle(tid, state)
+        )
+        if task.get("done"):
+            self.box.setStyleSheet(
+                "color:#9ca3af; text-decoration:line-through;"
+            )
+        layout.addWidget(self.box, 1)
+
+        repeat = task.get("repeat", "None")
+        if repeat and repeat != "None":
+            badge = QLabel("↻")
+            badge.setToolTip("Repeats " + repeat)
+            badge.setStyleSheet("color:#6b7280; font-size:11px;")
+            layout.addWidget(badge)
+
+        if task.get("pinned"):
+            pin = QLabel("●")
+            pin.setToolTip("Pinned")
+            pin.setStyleSheet("color:#6478ff; font-size:9px;")
+            layout.addWidget(pin)
+
+        menu_button = QPushButton("•••")
+        menu_button.setFixedSize(30, 30)
+        menu_button.clicked.connect(
+            lambda _, tid=self.task_id, button=menu_button:
+            owner.task_menu(tid, button)
+        )
+        layout.addWidget(menu_button)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.drag_start = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.drag_start is not None and event.buttons() & Qt.LeftButton:
+            if (event.position().toPoint() - self.drag_start).manhattanLength() > 8:
+                self.owner.start_task_drag(self.task_id)
+                self.drag_start = None
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.drag_start is not None:
+            self.drag_start = None
+        super().mouseReleaseEvent(event)
+
+
 class TodoWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -125,6 +198,10 @@ class TodoWindow(QWidget):
         self.manual_hide = False
         self.desktop_only = SETTINGS.value("desktop_only", True, type=bool)
         self.drag_pos = None
+        self.task_rows = {}
+        self.dragging_task_id = None
+        self.undo_stack = []
+        self.redo_stack = []
         self.hotkey_registered = False
         self.mini_button = None
 
@@ -197,6 +274,10 @@ class TodoWindow(QWidget):
             task.setdefault("tags", "")
             task.setdefault("notes", "")
             task.setdefault("pinned", False)
+            task.setdefault("repeat", "None")
+            task.setdefault("subtasks", [])
+            if not isinstance(task.get("subtasks"), list):
+                task["subtasks"] = []
             task.setdefault("created_at", datetime.now().isoformat(timespec="seconds"))
 
         if changed:
@@ -230,7 +311,31 @@ class TodoWindow(QWidget):
             str(task.get(k, ""))
             for k in ("text", "tags", "notes", "category", "priority")
         ).lower()
-        return q in haystack
+        tokens = q.split()
+        for token in tokens:
+            if ":" in token:
+                key, value = token.split(":", 1)
+                value = value.strip().lower()
+                if key == "priority" and task.get("priority", "").lower() != value:
+                    return False
+                if key == "category" and task.get("category", "").lower() != value:
+                    return False
+                if key == "status":
+                    wanted = value == "done"
+                    if bool(task.get("done")) != wanted:
+                        return False
+                if key == "tag" and value not in str(task.get("tags", "")).lower():
+                    return False
+                if key == "due":
+                    today = date.today().isoformat()
+                    due = task.get("due_date", "")
+                    if value == "today" and due != today:
+                        return False
+                    if value == "overdue" and not (due and due < today and not task.get("done")):
+                        return False
+            elif token not in haystack:
+                return False
+        return True
 
     def sort_tasks(self, tasks):
         mode = getattr(self, "sort_mode", "Smart")
@@ -244,7 +349,9 @@ class TodoWindow(QWidget):
                 return (priority, due, task.get("text", "").lower())
             if mode == "Alphabetical":
                 return (task.get("text", "").lower(), due)
-            if mode == "Newest":
+            if mode == "Manual":
+            return list(tasks)
+        if mode == "Newest":
                 return (created * -1 if False else created,)
             return (0 if task.get("pinned") else 1, 0 if due == date.today().isoformat() else 1, due, priority)
 
@@ -270,9 +377,10 @@ class TodoWindow(QWidget):
         dialog.setWindowTitle("Productivity")
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(22, 18, 22, 18)
+        percent = int((completed / total) * 100) if total else 0
         stats = QLabel(
             f"<b>Total</b> {total}<br>"
-            f"<b>Completed</b> {completed}<br>"
+            f"<b>Completed</b> {completed} ({percent}%)<br>"
             f"<b>Pending</b> {pending}<br>"
             f"<b>Overdue</b> {overdue}<br>"
             f"<b>Pinned</b> {pinned}<br><br>"
@@ -290,44 +398,56 @@ class TodoWindow(QWidget):
         self.setStyleSheet(
             """
             QWidget {
-                color: #f4f4f5;
+                color: #172033;
                 font-family: "Segoe UI";
             }
             #card {
-                background: #15171b;
-                border: 1px solid #292d33;
-                border-radius: 16px;
+                background: rgba(255, 255, 255, 225);
+                border: 1px solid rgba(255, 255, 255, 245);
+                border-radius: 22px;
+            }
+            #taskRow {
+                background: rgba(255, 255, 255, 155);
+                border: 1px solid rgba(255, 255, 255, 190);
+                border-radius: 11px;
             }
             QPushButton {
-                background: transparent;
-                color: #9b9da5;
+                background: rgba(255, 255, 255, 110);
+                color: #526078;
                 border: 0;
                 border-radius: 8px;
                 padding: 5px;
             }
             QPushButton:hover {
-                background: #25282e;
-                color: #ffffff;
+                background: rgba(255, 255, 255, 205);
+                color: #172033;
             }
             QCheckBox {
-                color: #f4f4f5;
+                color: #172033;
                 spacing: 9px;
                 padding: 7px 3px;
                 font-size: 13px;
             }
             QLineEdit, QComboBox, QDateEdit, QTimeEdit {
-                background: #202329;
-                color: #f4f4f5;
-                border: 1px solid #30343b;
+                background: rgba(255, 255, 255, 205);
+                color: #172033;
+                border: 1px solid rgba(180, 190, 210, 170);
                 border-radius: 8px;
                 padding: 7px;
             }
             QDialog {
-                background: #15171b;
+                background: rgba(248, 250, 255, 245);
+            }
+            QPlainTextEdit {
+                background: rgba(255, 255, 255, 205);
+                color: #172033;
+                border: 1px solid rgba(180, 190, 210, 170);
+                border-radius: 8px;
+                padding: 7px;
             }
             QMenu {
-                background: #202329;
-                color: #f4f4f5;
+                background: rgba(250, 252, 255, 250);
+                color: #172033;
                 border: 1px solid #343840;
                 padding: 5px;
             }
@@ -336,7 +456,7 @@ class TodoWindow(QWidget):
                 border-radius: 6px;
             }
             QMenu::item:selected {
-                background: #30343b;
+                background: rgba(220, 228, 242, 230);
             }
             """
         )
@@ -355,7 +475,7 @@ class TodoWindow(QWidget):
         header = QHBoxLayout()
         title = QLabel("✓  Sticky")
         title.setStyleSheet(
-            "font-size: 14px; font-weight: 700; color: #ffffff;"
+            "font-size: 14px; font-weight: 700; color: #172033;"
         )
         header.addWidget(title)
         header.addStretch()
@@ -378,7 +498,7 @@ class TodoWindow(QWidget):
 
         self.list_layout = QVBoxLayout()
         self.list_layout.setContentsMargins(0, 3, 0, 0)
-        self.list_layout.setSpacing(1)
+        self.list_layout.setSpacing(5)
         root.addLayout(self.list_layout)
 
     def create_minimize_icon(self):
@@ -433,6 +553,9 @@ class TodoWindow(QWidget):
         settings = menu.addAction("Settings")
         settings.triggered.connect(self.show_settings)
 
+        backup = menu.addAction("Backup / Restore")
+        backup.triggered.connect(self.backup_restore_menu)
+
         menu.addSeparator()
 
         minimize = menu.addAction("Minimize to icon")
@@ -478,7 +601,7 @@ class TodoWindow(QWidget):
             self.render()
 
     def choose_sort(self):
-        choices = ["Smart", "Due date", "Priority", "Alphabetical", "Newest"]
+        choices = ["Smart", "Manual", "Due date", "Priority", "Alphabetical", "Newest"]
         current = getattr(self, "sort_mode", "Smart")
         index = choices.index(current) if current in choices else 0
         choice, ok = QInputDialog.getItem(
@@ -560,9 +683,21 @@ class TodoWindow(QWidget):
         tags.setPlaceholderText("e.g. urgent, project-x")
         form.addRow("Tags", tags)
 
-        notes = QLineEdit(task.get("notes", "") if task else "")
+        notes = QPlainTextEdit(task.get("notes", "") if task else "")
         notes.setPlaceholderText("Optional note")
+        notes.setFixedHeight(70)
         form.addRow("Note", notes)
+
+        repeat = QComboBox()
+        repeat.addItems(["None", "Daily", "Weekly", "Monthly"])
+        repeat.setCurrentText(task.get("repeat", "None") if task else "None")
+        form.addRow("Repeat", repeat)
+
+        subtasks = QLineEdit(
+            ", ".join(task.get("subtasks", [])) if task else ""
+        )
+        subtasks.setPlaceholderText("Subtasks separated by commas")
+        form.addRow("Subtasks", subtasks)
 
         pinned = QCheckBox("Pin task")
         pinned.setChecked(bool(task and task.get("pinned")))
@@ -629,8 +764,10 @@ class TodoWindow(QWidget):
                     "category": category.currentText(),
                     "priority": priority.currentText(),
                     "tags": tags.text().strip(),
-                    "notes": notes.text().strip(),
+                    "notes": notes.toPlainText().strip(),
                     "pinned": pinned.isChecked(),
+                    "repeat": repeat.currentText(),
+                    "subtasks": [x.strip() for x in subtasks.text().split(",") if x.strip()],
                     "due_date": due_value,
                     "reminder": reminder_value,
                     "notified": False,
@@ -643,6 +780,11 @@ class TodoWindow(QWidget):
                         priority.currentText(),
                         due_value,
                         reminder_value,
+                        tags.text().strip(),
+                        notes.toPlainText().strip(),
+                        pinned.isChecked(),
+                        repeat.currentText(),
+                        [x.strip() for x in subtasks.text().split(",") if x.strip()],
                     )
                 )
 
@@ -679,6 +821,7 @@ class TodoWindow(QWidget):
         query = self.search_query
         category = self.category_filter
 
+        self.task_rows = {}
         visible = []
         for task in self.tasks:
             if query and not self.task_matches(task):
@@ -723,40 +866,33 @@ class TodoWindow(QWidget):
                 self.add_task_row(task)
 
     def add_task_row(self, task):
-        row = QHBoxLayout()
-        row.setContentsMargins(2, 1, 2, 1)
-        row.setSpacing(2)
+        row = TaskRow(self, task)
+        self.task_rows[task.get("id")] = row
+        self.list_layout.addWidget(row)
 
-        box = QCheckBox(task.get("text", ""))
-        box.setChecked(bool(task.get("done")))
-        task_id = task.get("id")
-        box.stateChanged.connect(
-            lambda state, tid=task_id: self.toggle(tid, state)
-        )
+    def start_task_drag(self, task_id):
+        if getattr(self, "sort_mode", "Smart") != "Manual":
+            self.sort_mode = "Manual"
+            SETTINGS.setValue("sort_mode", "Manual")
+        self.dragging_task_id = task_id
+        QApplication.setOverrideCursor(Qt.ClosedHandCursor)
+        QTimer.singleShot(0, self.finish_task_drag)
 
-        if task.get("done"):
-            box.setStyleSheet(
-                "color:#666a73; text-decoration:line-through;"
-            )
-
-        row.addWidget(box, 1)
-
-        if task.get("pinned"):
-            pin = QLabel("●")
-            pin.setToolTip("Pinned")
-            pin.setStyleSheet("color:#8b92ff; font-size:9px;")
-            row.addWidget(pin)
-
-        menu_button = QPushButton("•••")
-        menu_button.setFixedSize(30, 30)
-        menu_button.setToolTip("Task options")
-        menu_button.clicked.connect(
-            lambda _, tid=task_id, button=menu_button:
-            self.task_menu(tid, button)
-        )
-        row.addWidget(menu_button)
-
-        self.list_layout.addLayout(row)
+    def finish_task_drag(self):
+        if not self.dragging_task_id:
+            return
+        # A simple, reliable desktop reorder: move the selected task one
+        # position toward the end on each drag gesture. The task menu still
+        # provides precise up/down movement.
+        task_id = self.dragging_task_id
+        self.dragging_task_id = None
+        QApplication.restoreOverrideCursor()
+        index = next((i for i,t in enumerate(self.tasks) if t.get("id")==task_id), None)
+        if index is not None and index < len(self.tasks)-1:
+            self.record_change()
+            self.tasks[index], self.tasks[index+1] = self.tasks[index+1], self.tasks[index]
+            self.save()
+            self.render()
 
     def task_menu(self, task_id, button):
         task = self.find_task(task_id)
@@ -791,6 +927,11 @@ class TodoWindow(QWidget):
             lambda: self.toggle(task_id, not task.get("done"))
         )
 
+        snooze = menu.addAction("Snooze 10 min")
+        snooze.triggered.connect(lambda: self.snooze_task(task_id, 10))
+
+        menu.addSeparator()
+
         delete = menu.addAction("Delete")
         delete.triggered.connect(
             lambda: self.remove(task_id)
@@ -798,7 +939,40 @@ class TodoWindow(QWidget):
 
         menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
 
+    def record_change(self):
+        self.undo_stack.append(json.loads(json.dumps(self.tasks)))
+        if len(self.undo_stack) > 30:
+            self.undo_stack.pop(0)
+        self.redo_stack.clear()
+
+    def undo(self):
+        if not self.undo_stack:
+            return
+        self.redo_stack.append(json.loads(json.dumps(self.tasks)))
+        self.tasks = self.undo_stack.pop()
+        self.save()
+        self.render()
+
+    def redo(self):
+        if not self.redo_stack:
+            return
+        self.undo_stack.append(json.loads(json.dumps(self.tasks)))
+        self.tasks = self.redo_stack.pop()
+        self.save()
+        self.render()
+
+    def snooze_task(self, task_id, minutes):
+        task = self.find_task(task_id)
+        if not task:
+            return
+        self.record_change()
+        when = datetime.now() + timedelta(minutes=minutes)
+        task["reminder"] = when.strftime("%Y-%m-%d %H:%M")
+        task["notified"] = False
+        self.save()
+
     def toggle_pin(self, task_id):
+        self.record_change()
         task = self.find_task(task_id)
         if task is None:
             return
@@ -812,6 +986,7 @@ class TodoWindow(QWidget):
             return
         target = index + direction
         if 0 <= target < len(self.tasks):
+            self.record_change()
             self.tasks[index], self.tasks[target] = self.tasks[target], self.tasks[index]
             self.save()
             self.render()
@@ -827,15 +1002,96 @@ class TodoWindow(QWidget):
         if not ok or not text.strip():
             return
 
-        self.tasks.append(new_task(text.strip()))
+        self.record_change()
+        self.add_parsed_task(text.strip())
+
+    def add_parsed_task(self, raw):
+        tokens = raw.split()
+        priority = "High" if any(t.lower() in ("high", "!high") for t in tokens) else "Medium"
+        category = next((t.split(":",1)[1].title() for t in tokens if t.lower().startswith("category:")), "Personal")
+        tags = [t[1:] for t in tokens if t.startswith("#") and len(t) > 1]
+        due = ""
+        if "today" in [t.lower() for t in tokens]:
+            due = date.today().isoformat()
+        elif "tomorrow" in [t.lower() for t in tokens]:
+            due = (date.today() + timedelta(days=1)).isoformat()
+        time_match = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", raw)
+        reminder = f"{due} {time_match.group(0)}" if due and time_match else ""
+        clean = re.sub(r"\b(today|tomorrow|high|!high|category:\S+|[01]?\d:[0-5]\d)\b", "", raw, flags=re.I)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        self.tasks.append(new_task(
+            clean or raw, category if category in CATEGORIES else "Personal",
+            priority, due, reminder, ", ".join(tags)
+        ))
         self.save()
         self.render()
+
+    def backup_restore_menu(self):
+        menu = QMenu(self)
+        backup = menu.addAction("Export backup")
+        backup.triggered.connect(self.export_backup)
+        restore = menu.addAction("Import backup")
+        restore.triggered.connect(self.import_backup)
+        menu.exec(QCursor.pos()) if False else menu.exec(self.mapToGlobal(QPoint(90, 90)))
+
+    def export_backup(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Export Sticky backup", "sticky-backup.json", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            Path(path).write_text(json.dumps(self.tasks, indent=2, ensure_ascii=False), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "Backup failed", str(exc))
+
+    def import_backup(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import Sticky backup", "", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            if not isinstance(data, list) or not all(isinstance(x, dict) for x in data):
+                raise ValueError("Invalid Sticky backup.")
+            self.record_change()
+            self.tasks = data
+            for task in self.tasks:
+                task.setdefault("id", uuid.uuid4().hex)
+                task.setdefault("done", False)
+                task.setdefault("subtasks", [])
+                task.setdefault("repeat", "None")
+            self.save()
+            self.render()
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            QMessageBox.warning(self, "Restore failed", str(exc))
 
     def toggle(self, task_id, state):
         task = self.find_task(task_id)
         if task is None:
             return
-        task["done"] = bool(state)
+        old_done = bool(task.get("done"))
+        new_done = bool(state)
+        if old_done == new_done:
+            return
+        self.record_change()
+        task["done"] = new_done
+        if new_done and task.get("repeat") and task.get("repeat") != "None":
+            next_task = json.loads(json.dumps(task))
+            next_task["id"] = uuid.uuid4().hex
+            next_task["done"] = False
+            next_task["notified"] = False
+            due = task.get("due_date")
+            if due:
+                qd = QDate.fromString(due, "yyyy-MM-dd")
+                if task.get("repeat") == "Daily":
+                    qd = qd.addDays(1)
+                elif task.get("repeat") == "Weekly":
+                    qd = qd.addDays(7)
+                elif task.get("repeat") == "Monthly":
+                    qd = qd.addMonths(1)
+                next_task["due_date"] = qd.toString("yyyy-MM-dd")
+                if task.get("reminder"):
+                    tm = task["reminder"][-5:]
+                    next_task["reminder"] = f'{next_task["due_date"]} {tm}'
+            self.tasks.append(next_task)
         self.save()
         self.render()
 
@@ -852,6 +1108,7 @@ class TodoWindow(QWidget):
             QMessageBox.No,
         )
         if answer == QMessageBox.Yes:
+            self.record_change()
             self.tasks = [
                 item for item in self.tasks
                 if item.get("id") != task_id
@@ -871,6 +1128,7 @@ class TodoWindow(QWidget):
             QMessageBox.No,
         )
         if answer == QMessageBox.Yes:
+            self.record_change()
             self.tasks = [
                 task for task in self.tasks if not task.get("done")
             ]
