@@ -1,8 +1,9 @@
+import ctypes
 import json
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt, QSettings
+from PySide6.QtCore import QPoint, Qt, QSettings, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -21,12 +22,25 @@ from PySide6.QtWidgets import (
 DATA = Path.home() / ".sticky_todo.json"
 SETTINGS = QSettings("DeathKernel", "StickyTodo")
 
+user32 = ctypes.windll.user32
+DESKTOP_CLASSES = {"Progman", "WorkerW"}
+
+
+def window_class(hwnd):
+    if not hwnd:
+        return ""
+    buffer = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(hwnd, buffer, 256)
+    return buffer.value
+
 
 class TodoWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.tasks = self.load()
         self.drag_pos = None
+        self.desktop_only = True
+        self.manual_hide = False
 
         self.setWindowTitle("Sticky Todo")
         self.setWindowFlags(
@@ -46,6 +60,11 @@ class TodoWindow(QWidget):
         self.apply_opacity()
         self.render()
 
+        self.desktop_timer = QTimer(self)
+        self.desktop_timer.setInterval(250)
+        self.desktop_timer.timeout.connect(self.update_desktop_visibility)
+        self.desktop_timer.start()
+
     def load(self):
         try:
             data = json.loads(DATA.read_text(encoding="utf-8"))
@@ -58,6 +77,26 @@ class TodoWindow(QWidget):
             json.dumps(self.tasks, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+
+    def update_desktop_visibility(self):
+        if not self.desktop_only:
+            return
+
+        hwnd = user32.GetForegroundWindow()
+        own_hwnd = int(self.winId())
+        active_class = window_class(hwnd)
+
+        # Keep the widget visible while the user is interacting with it.
+        if hwnd == own_hwnd:
+            return
+
+        on_desktop = active_class in DESKTOP_CLASSES
+
+        if on_desktop and not self.manual_hide:
+            if not self.isVisible():
+                self.show()
+        elif not on_desktop and self.isVisible():
+            self.hide()
 
     def build(self):
         self.card = QFrame()
@@ -119,10 +158,10 @@ class TodoWindow(QWidget):
         self.count.setStyleSheet("color:#9ca3af;")
         minimize = QPushButton("—")
         minimize.setFixedWidth(30)
-        minimize.clicked.connect(self.hide)
+        minimize.clicked.connect(self.hide_from_desktop)
         close = QPushButton("×")
         close.setFixedWidth(30)
-        close.clicked.connect(self.hide)
+        close.clicked.connect(self.hide_from_desktop)
         top.addWidget(title)
         top.addStretch()
         top.addWidget(self.count)
@@ -252,6 +291,10 @@ class TodoWindow(QWidget):
         SETTINGS.setValue("position", self.pos())
         super().moveEvent(event)
 
+    def hide_from_desktop(self):
+        self.manual_hide = True
+        self.hide()
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.drag_pos = (
@@ -280,9 +323,9 @@ tray.setToolTip("Sticky Todo")
 
 menu = QMenu()
 show_action = menu.addAction("Show Sticky")
-show_action.triggered.connect(window.show)
+show_action.triggered.connect(lambda: (setattr(window, "manual_hide", False), window.show()))
 hide_action = menu.addAction("Hide Sticky")
-hide_action.triggered.connect(window.hide)
+hide_action.triggered.connect(window.hide_from_desktop)
 menu.addSeparator()
 quit_action = menu.addAction("Quit")
 quit_action.triggered.connect(app.quit)
