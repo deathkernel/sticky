@@ -359,11 +359,12 @@ class TodoWindow(QWidget):
                 return (priority, due, task.get("text", "").lower())
             if mode == "Alphabetical":
                 return (task.get("text", "").lower(), due)
-            if mode == "Manual":
-            return list(tasks)
-        if mode == "Newest":
-                return (created * -1 if False else created,)
+            if mode == "Newest":
+                return (created,)
             return (0 if task.get("pinned") else 1, 0 if due == date.today().isoformat() else 1, due, priority)
+
+        if mode == "Manual":
+            return list(tasks)
 
         if mode == "Newest":
             return sorted(tasks, key=lambda t: t.get("created_at", ""), reverse=True)
