@@ -336,6 +336,8 @@ class TodoWindow(QWidget):
 
     def open_task_dialog(self, idx=None):
         editing = idx is not None
+        if editing and not (0 <= idx < len(self.tasks)):
+            return
         task = self.tasks[idx] if editing else {}
 
         dialog = QDialog(self)
