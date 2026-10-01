@@ -70,7 +70,16 @@ def window_class(hwnd):
     return buffer.value
 
 
-def new_task(text, category="Personal", priority="Medium", due_date="", reminder=""):
+def new_task(
+    text,
+    category="Personal",
+    priority="Medium",
+    due_date="",
+    reminder="",
+    tags="",
+    notes="",
+    pinned=False,
+):
     return {
         "id": uuid.uuid4().hex,
         "text": text,
@@ -80,6 +89,10 @@ def new_task(text, category="Personal", priority="Medium", due_date="", reminder
         "due_date": due_date,
         "reminder": reminder,
         "notified": False,
+        "tags": tags,
+        "notes": notes,
+        "pinned": pinned,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
     }
 
 
@@ -108,8 +121,9 @@ class TodoWindow(QWidget):
         self.tasks = self.load()
         self.search_query = ""
         self.category_filter = "All categories"
+        self.sort_mode = str(SETTINGS.value("sort_mode", "Smart"))
         self.manual_hide = False
-        self.desktop_only = True
+        self.desktop_only = SETTINGS.value("desktop_only", True, type=bool)
         self.drag_pos = None
         self.hotkey_registered = False
         self.mini_button = None
@@ -180,6 +194,10 @@ class TodoWindow(QWidget):
             task.setdefault("due_date", "")
             task.setdefault("reminder", "")
             task.setdefault("notified", False)
+            task.setdefault("tags", "")
+            task.setdefault("notes", "")
+            task.setdefault("pinned", False)
+            task.setdefault("created_at", datetime.now().isoformat(timespec="seconds"))
 
         if changed:
             try:
@@ -200,6 +218,73 @@ class TodoWindow(QWidget):
             )
         except OSError:
             pass
+
+    def save_setting(self, key, value):
+        SETTINGS.setValue(key, value)
+
+    def task_matches(self, task):
+        q = self.search_query
+        if not q:
+            return True
+        haystack = " ".join(
+            str(task.get(k, ""))
+            for k in ("text", "tags", "notes", "category", "priority")
+        ).lower()
+        return q in haystack
+
+    def sort_tasks(self, tasks):
+        mode = getattr(self, "sort_mode", "Smart")
+        def key(task):
+            due = task.get("due_date") or "9999-12-31"
+            priority = {"High": 0, "Medium": 1, "Low": 2}.get(task.get("priority"), 1)
+            created = task.get("created_at", "")
+            if mode == "Due date":
+                return (due, task.get("text", "").lower())
+            if mode == "Priority":
+                return (priority, due, task.get("text", "").lower())
+            if mode == "Alphabetical":
+                return (task.get("text", "").lower(), due)
+            if mode == "Newest":
+                return (created * -1 if False else created,)
+            return (0 if task.get("pinned") else 1, 0 if due == date.today().isoformat() else 1, due, priority)
+
+        if mode == "Newest":
+            return sorted(tasks, key=lambda t: t.get("created_at", ""), reverse=True)
+        return sorted(tasks, key=key)
+
+    def show_productivity(self):
+        total = len(self.tasks)
+        completed = sum(1 for t in self.tasks if t.get("done"))
+        pending = total - completed
+        overdue = sum(
+            1 for t in self.tasks
+            if not t.get("done") and t.get("due_date") and t.get("due_date") < date.today().isoformat()
+        )
+        pinned = sum(1 for t in self.tasks if t.get("pinned"))
+        categories = {}
+        for task in self.tasks:
+            cat = task.get("category", "Personal")
+            categories[cat] = categories.get(cat, 0) + 1
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Productivity")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 18, 22, 18)
+        stats = QLabel(
+            f"<b>Total</b> {total}<br>"
+            f"<b>Completed</b> {completed}<br>"
+            f"<b>Pending</b> {pending}<br>"
+            f"<b>Overdue</b> {overdue}<br>"
+            f"<b>Pinned</b> {pinned}<br><br>"
+            + "<b>Categories</b><br>"
+            + "<br>".join(f"{k}: {v}" for k, v in sorted(categories.items()))
+        )
+        stats.setTextFormat(Qt.RichText)
+        layout.addWidget(stats)
+        close = QPushButton("Close")
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close)
+        dialog.exec()
 
     def build(self):
         self.setStyleSheet(
@@ -331,6 +416,9 @@ class TodoWindow(QWidget):
         clear_filter = menu.addAction("Clear filters")
         clear_filter.triggered.connect(self.clear_filters)
 
+        sort = menu.addAction("Sort")
+        sort.triggered.connect(self.choose_sort)
+
         menu.addSeparator()
 
         clear_completed = menu.addAction("Clear completed")
@@ -338,6 +426,12 @@ class TodoWindow(QWidget):
 
         opacity = menu.addAction("Opacity")
         opacity.triggered.connect(self.change_opacity_dialog)
+
+        productivity = menu.addAction("Productivity")
+        productivity.triggered.connect(self.show_productivity)
+
+        settings = menu.addAction("Settings")
+        settings.triggered.connect(self.show_settings)
 
         menu.addSeparator()
 
@@ -382,6 +476,37 @@ class TodoWindow(QWidget):
         if ok:
             self.category_filter = choice
             self.render()
+
+    def choose_sort(self):
+        choices = ["Smart", "Due date", "Priority", "Alphabetical", "Newest"]
+        current = getattr(self, "sort_mode", "Smart")
+        index = choices.index(current) if current in choices else 0
+        choice, ok = QInputDialog.getItem(
+            self, "Sort tasks", "Sort by:", choices, index, False
+        )
+        if ok:
+            self.sort_mode = choice
+            SETTINGS.setValue("sort_mode", choice)
+            self.render()
+
+    def show_settings(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Sticky Settings")
+        form = QFormLayout(dialog)
+        form.setContentsMargins(18, 16, 18, 16)
+
+        desktop = QCheckBox("Show only on Windows desktop")
+        desktop.setChecked(self.desktop_only)
+        form.addRow(desktop)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+
+        if dialog.exec() == QDialog.Accepted:
+            self.desktop_only = desktop.isChecked()
+            SETTINGS.setValue("desktop_only", self.desktop_only)
 
     def clear_filters(self):
         self.search_query = ""
@@ -430,6 +555,18 @@ class TodoWindow(QWidget):
         priority.addItems(PRIORITIES)
         priority.setCurrentText(task.get("priority", "Medium") if task else "Medium")
         form.addRow("Priority", priority)
+
+        tags = QLineEdit(task.get("tags", "") if task else "")
+        tags.setPlaceholderText("e.g. urgent, project-x")
+        form.addRow("Tags", tags)
+
+        notes = QLineEdit(task.get("notes", "") if task else "")
+        notes.setPlaceholderText("Optional note")
+        form.addRow("Note", notes)
+
+        pinned = QCheckBox("Pin task")
+        pinned.setChecked(bool(task and task.get("pinned")))
+        form.addRow("", pinned)
 
         due_enabled = QCheckBox("Set due date")
         due_enabled.setChecked(bool(task and task.get("due_date")))
@@ -491,6 +628,9 @@ class TodoWindow(QWidget):
                     "text": task_text,
                     "category": category.currentText(),
                     "priority": priority.currentText(),
+                    "tags": tags.text().strip(),
+                    "notes": notes.text().strip(),
+                    "pinned": pinned.isChecked(),
                     "due_date": due_value,
                     "reminder": reminder_value,
                     "notified": False,
@@ -541,7 +681,7 @@ class TodoWindow(QWidget):
 
         visible = []
         for task in self.tasks:
-            if query and query not in task.get("text", "").lower():
+            if query and not self.task_matches(task):
                 continue
             if (
                 category != "All categories"
@@ -558,7 +698,7 @@ class TodoWindow(QWidget):
             due = task.get("due_date") or "9999-12-31"
             return (0 if due == today else 1, due, task.get("text", "").lower())
 
-        pending.sort(key=sort_key)
+        pending = self.sort_tasks(pending)
         completed.sort(key=lambda t: t.get("text", "").lower())
 
         if not visible:
@@ -601,6 +741,12 @@ class TodoWindow(QWidget):
 
         row.addWidget(box, 1)
 
+        if task.get("pinned"):
+            pin = QLabel("●")
+            pin.setToolTip("Pinned")
+            pin.setStyleSheet("color:#8b92ff; font-size:9px;")
+            row.addWidget(pin)
+
         menu_button = QPushButton("•••")
         menu_button.setFixedSize(30, 30)
         menu_button.setToolTip("Task options")
@@ -624,6 +770,20 @@ class TodoWindow(QWidget):
             lambda: self.open_task_dialog(task_id)
         )
 
+        pin_action = menu.addAction(
+            "Unpin" if task.get("pinned") else "Pin"
+        )
+        pin_action.triggered.connect(
+            lambda: self.toggle_pin(task_id)
+        )
+
+        move_up = menu.addAction("Move up")
+        move_up.triggered.connect(lambda: self.move_task(task_id, -1))
+        move_down = menu.addAction("Move down")
+        move_down.triggered.connect(lambda: self.move_task(task_id, 1))
+
+        menu.addSeparator()
+
         toggle = menu.addAction(
             "Mark incomplete" if task.get("done") else "Mark complete"
         )
@@ -637,6 +797,24 @@ class TodoWindow(QWidget):
         )
 
         menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+
+    def toggle_pin(self, task_id):
+        task = self.find_task(task_id)
+        if task is None:
+            return
+        task["pinned"] = not task.get("pinned", False)
+        self.save()
+        self.render()
+
+    def move_task(self, task_id, direction):
+        index = next((i for i, t in enumerate(self.tasks) if t.get("id") == task_id), None)
+        if index is None:
+            return
+        target = index + direction
+        if 0 <= target < len(self.tasks):
+            self.tasks[index], self.tasks[target] = self.tasks[target], self.tasks[index]
+            self.save()
+            self.render()
 
     def quick_add(self):
         text, ok = QInputDialog.getText(
