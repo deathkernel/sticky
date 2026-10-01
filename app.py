@@ -1,23 +1,20 @@
 import ctypes
 import json
 import sys
+from datetime import datetime, date
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt, QSettings, QTimer
+from PySide6.QtCore import QPoint, Qt, QDate, QTime, QSettings, QTimer
 from PySide6.QtWidgets import (
-    QApplication,
-    QCheckBox,
-    QFrame,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMenu,
-    QPushButton,
-    QSlider,
-    QSystemTrayIcon,
-    QVBoxLayout,
-    QWidget,
+    QApplication, QCheckBox, QComboBox, QDateEdit, QFrame, QHBoxLayout,
+    QLabel, QLineEdit, QMenu, QPushButton, QSlider, QSystemTrayIcon,
+    QTimeEdit, QVBoxLayout, QWidget,
 )
+
+try:
+    from winotify import Notification
+except ImportError:
+    Notification = None
 
 DATA = Path.home() / ".sticky_todo.json"
 SETTINGS = QSettings("DeathKernel", "StickyTodo")
@@ -47,7 +44,7 @@ class TodoWindow(QWidget):
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.resize(390, 500)
+        self.resize(430, 570)
 
         saved_pos = SETTINGS.value("position")
         if isinstance(saved_pos, QPoint):
@@ -65,10 +62,23 @@ class TodoWindow(QWidget):
         self.desktop_timer.timeout.connect(self.update_desktop_visibility)
         self.desktop_timer.start()
 
+        self.reminder_timer = QTimer(self)
+        self.reminder_timer.setInterval(15000)
+        self.reminder_timer.timeout.connect(self.check_reminders)
+        self.reminder_timer.start()
+
     def load(self):
         try:
             data = json.loads(DATA.read_text(encoding="utf-8"))
-            return data if isinstance(data, list) else []
+            if not isinstance(data, list):
+                return []
+            # Normalize tasks created by older versions.
+            for task in data:
+                task.setdefault("priority", "Medium")
+                task.setdefault("due_date", "")
+                task.setdefault("reminder", "")
+                task.setdefault("notified", False)
+            return data
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return []
 
@@ -86,7 +96,6 @@ class TodoWindow(QWidget):
         own_hwnd = int(self.winId())
         active_class = window_class(hwnd)
 
-        # Keep the widget visible while the user is interacting with it.
         if hwnd == own_hwnd:
             return
 
@@ -109,14 +118,21 @@ class TodoWindow(QWidget):
                 border-radius: 18px;
             }
             QLabel { color: #f5f7fb; }
-            QLineEdit {
+            QLineEdit, QComboBox, QDateEdit, QTimeEdit {
                 background: #22252d;
                 color: #fff;
                 border: 1px solid #363a45;
-                border-radius: 10px;
-                padding: 10px;
+                border-radius: 9px;
+                padding: 8px;
             }
-            QLineEdit:focus { border: 1px solid #5965ff; }
+            QLineEdit:focus, QComboBox:focus, QDateEdit:focus, QTimeEdit:focus {
+                border: 1px solid #5965ff;
+            }
+            QComboBox QAbstractItemView {
+                background: #22252d;
+                color: #fff;
+                selection-background-color: #383d48;
+            }
             QPushButton {
                 background: #292d36;
                 color: #fff;
@@ -149,7 +165,7 @@ class TodoWindow(QWidget):
 
         root = QVBoxLayout(self.card)
         root.setContentsMargins(18, 16, 18, 18)
-        root.setSpacing(10)
+        root.setSpacing(9)
 
         top = QHBoxLayout()
         title = QLabel("✓  STICKY TODO")
@@ -179,6 +195,39 @@ class TodoWindow(QWidget):
         add.addWidget(self.input)
         add.addWidget(btn)
         root.addLayout(add)
+
+        options = QHBoxLayout()
+        self.due_date = QDateEdit(QDate.currentDate())
+        self.due_date.setCalendarPopup(True)
+        self.due_date.setDisplayFormat("dd MMM")
+        self.due_date.setToolTip("Due date")
+
+        self.priority = QComboBox()
+        self.priority.addItems(["Low", "Medium", "High"])
+        self.priority.setCurrentText("Medium")
+        self.priority.setToolTip("Priority")
+
+        self.reminder = QTimeEdit()
+        self.reminder.setDisplayFormat("HH:mm")
+        self.reminder.setTime(QTime.currentTime())
+        self.reminder.setToolTip("Reminder time (today)")
+        self.reminder.setSpecialValueText("No reminder")
+        self.reminder.setMinimumTime(QTime(0, 0))
+        self.reminder.setMaximumTime(QTime(23, 59))
+
+        no_reminder = QPushButton("No alarm")
+        no_reminder.setToolTip("Add task without a reminder")
+        no_reminder.clicked.connect(lambda: self.reminder.setProperty("enabled", False))
+        self.reminder.setProperty("enabled", False)
+
+        options.addWidget(self.due_date, 2)
+        options.addWidget(self.priority, 1)
+        options.addWidget(self.reminder, 1)
+        root.addLayout(options)
+
+        hint = QLabel("Date • Priority • reminder time")
+        hint.setStyleSheet("color:#777d89; font-size:10px;")
+        root.addWidget(hint)
 
         self.list_layout = QVBoxLayout()
         self.list_layout.setSpacing(2)
@@ -213,6 +262,18 @@ class TodoWindow(QWidget):
         pending = [(i, t) for i, t in enumerate(self.tasks) if not t.get("done")]
         completed = [(i, t) for i, t in enumerate(self.tasks) if t.get("done")]
 
+        today = date.today().isoformat()
+
+        def sort_key(item):
+            _, task = item
+            due = task.get("due_date") or "9999-12-31"
+            # High priority first, then due date.
+            priority_order = {"High": 0, "Medium": 1, "Low": 2}
+            return (0 if due == today else 1, due, priority_order.get(task.get("priority"), 1))
+
+        pending.sort(key=sort_key)
+        completed.sort(key=lambda item: item[1].get("due_date") or "9999-12-31")
+
         done = len(completed)
         self.count.setText(f"{done}/{len(self.tasks)} done")
 
@@ -221,7 +282,15 @@ class TodoWindow(QWidget):
             empty.setStyleSheet("color:#777d89; padding:12px 3px;")
             self.list_layout.addWidget(empty)
 
+        shown_today_header = False
         for idx, task in pending:
+            if task.get("due_date") == today and not shown_today_header:
+                label = QLabel("TODAY")
+                label.setStyleSheet(
+                    "color:#7c83ff; font-size:11px; font-weight:700; margin-top:5px;"
+                )
+                self.list_layout.addWidget(label)
+                shown_today_header = True
             self.add_task_row(idx, task)
 
         if completed:
@@ -240,12 +309,44 @@ class TodoWindow(QWidget):
         box.stateChanged.connect(
             lambda state, index=idx: self.toggle(index, state)
         )
+
+        priority = task.get("priority", "Medium")
+        due = task.get("due_date", "")
+        reminder = task.get("reminder", "")
+
+        details = []
+        if due:
+            if due == date.today().isoformat():
+                details.append("Today")
+            else:
+                try:
+                    details.append(datetime.strptime(due, "%Y-%m-%d").strftime("%d %b"))
+                except ValueError:
+                    details.append(due)
+        details.append(priority)
+        if reminder:
+            details.append(f"⏰ {reminder}")
+
+        meta = QLabel("  •  ".join(details))
+        meta.setStyleSheet(
+            "color:#9ca3af; font-size:10px;" +
+            (" text-decoration:line-through;" if task.get("done") else "")
+        )
+
         if task.get("done"):
             box.setStyleSheet("color:#777d89; text-decoration:line-through;")
+
         delete = QPushButton("×")
         delete.setFixedWidth(28)
         delete.clicked.connect(lambda _, index=idx: self.remove(index))
-        row.addWidget(box)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(0)
+        text_col.addWidget(box)
+        if details:
+            text_col.addWidget(meta)
+
+        row.addLayout(text_col)
         row.addStretch()
         row.addWidget(delete)
         self.list_layout.addLayout(row)
@@ -254,7 +355,22 @@ class TodoWindow(QWidget):
         text = self.input.text().strip()
         if not text:
             return
-        self.tasks.append({"text": text, "done": False})
+
+        due = self.due_date.date().toString("yyyy-MM-dd")
+        priority = self.priority.currentText()
+
+        # A reminder is enabled by setting the time field to a non-zero time.
+        reminder_time = self.reminder.time().toString("HH:mm")
+        reminder = "" if reminder_time == "00:00" else f"{due} {reminder_time}"
+
+        self.tasks.append({
+            "text": text,
+            "done": False,
+            "priority": priority,
+            "due_date": due,
+            "reminder": reminder,
+            "notified": False,
+        })
         self.input.clear()
         self.save()
         self.render()
@@ -276,6 +392,40 @@ class TodoWindow(QWidget):
         self.tasks = [task for task in self.tasks if not task.get("done")]
         self.save()
         self.render()
+
+    def check_reminders(self):
+        if not Notification:
+            return
+
+        now = datetime.now()
+        changed = False
+
+        for task in self.tasks:
+            if task.get("done") or task.get("notified") or not task.get("reminder"):
+                continue
+
+            try:
+                reminder_at = datetime.strptime(task["reminder"], "%Y-%m-%d %H:%M")
+            except (TypeError, ValueError):
+                continue
+
+            if reminder_at <= now:
+                try:
+                    toast = Notification(
+                        app_id="Sticky Todo",
+                        title="Sticky Todo reminder",
+                        msg=task.get("text", "Task due"),
+                    )
+                    toast.show()
+                except Exception:
+                    continue
+
+                task["notified"] = True
+                changed = True
+
+        if changed:
+            self.save()
+            self.render()
 
     def opacity_changed(self, value):
         SETTINGS.setValue("opacity", value)
@@ -323,7 +473,9 @@ tray.setToolTip("Sticky Todo")
 
 menu = QMenu()
 show_action = menu.addAction("Show Sticky")
-show_action.triggered.connect(lambda: (setattr(window, "manual_hide", False), window.show()))
+show_action.triggered.connect(
+    lambda: (setattr(window, "manual_hide", False), window.show())
+)
 hide_action = menu.addAction("Hide Sticky")
 hide_action.triggered.connect(window.hide_from_desktop)
 menu.addSeparator()
