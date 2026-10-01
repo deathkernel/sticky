@@ -177,12 +177,22 @@ class TaskRow(QWidget):
     def mouseMoveEvent(self, event):
         if self.drag_start is not None and event.buttons() & Qt.LeftButton:
             if (event.position().toPoint() - self.drag_start).manhattanLength() > 8:
-                self.owner.start_task_drag(self.task_id)
-                self.drag_start = None
+                self.owner.dragging_task_id = self.task_id
+                QApplication.setOverrideCursor(Qt.ClosedHandCursor)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton and self.drag_start is not None:
+        if event.button() == Qt.LeftButton:
+            if self.owner.dragging_task_id == self.task_id:
+                self.owner.reorder_by_drop(
+                    self.task_id,
+                    event.globalPosition().toPoint().y(),
+                )
+                self.owner.dragging_task_id = None
+                try:
+                    QApplication.restoreOverrideCursor()
+                except Exception:
+                    pass
             self.drag_start = None
         super().mouseReleaseEvent(event)
 
@@ -870,29 +880,39 @@ class TodoWindow(QWidget):
         self.task_rows[task.get("id")] = row
         self.list_layout.addWidget(row)
 
-    def start_task_drag(self, task_id):
+    def reorder_by_drop(self, task_id, global_y):
         if getattr(self, "sort_mode", "Smart") != "Manual":
             self.sort_mode = "Manual"
             SETTINGS.setValue("sort_mode", "Manual")
-        self.dragging_task_id = task_id
-        QApplication.setOverrideCursor(Qt.ClosedHandCursor)
-        QTimer.singleShot(0, self.finish_task_drag)
 
-    def finish_task_drag(self):
-        if not self.dragging_task_id:
+        source = next((i for i, t in enumerate(self.tasks) if t.get("id") == task_id), None)
+        if source is None:
             return
-        # A simple, reliable desktop reorder: move the selected task one
-        # position toward the end on each drag gesture. The task menu still
-        # provides precise up/down movement.
-        task_id = self.dragging_task_id
-        self.dragging_task_id = None
-        QApplication.restoreOverrideCursor()
-        index = next((i for i,t in enumerate(self.tasks) if t.get("id")==task_id), None)
-        if index is not None and index < len(self.tasks)-1:
-            self.record_change()
-            self.tasks[index], self.tasks[index+1] = self.tasks[index+1], self.tasks[index]
-            self.save()
-            self.render()
+
+        target = None
+        best_distance = None
+        for tid, row in self.task_rows.items():
+            if tid == task_id:
+                continue
+            center_y = row.mapToGlobal(row.rect().center()).y()
+            distance = abs(center_y - global_y)
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                target = next(
+                    (i for i, t in enumerate(self.tasks) if t.get("id") == tid),
+                    None,
+                )
+
+        if target is None or target == source:
+            return
+
+        self.record_change()
+        item = self.tasks.pop(source)
+        if source < target:
+            target -= 1
+        self.tasks.insert(max(0, min(target, len(self.tasks))), item)
+        self.save()
+        self.render()
 
     def task_menu(self, task_id, button):
         task = self.find_task(task_id)
