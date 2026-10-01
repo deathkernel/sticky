@@ -3,15 +3,40 @@ from ctypes import wintypes
 import json
 import signal
 import sys
+import uuid
 from datetime import datetime, date
 from pathlib import Path
 
-from PySide6.QtCore import QAbstractNativeEventFilter, QPoint, Qt, QDate, QTime, QSettings, QTimer
+from PySide6.QtCore import (
+    QAbstractNativeEventFilter,
+    QPoint,
+    QDate,
+    QTime,
+    QSettings,
+    QTimer,
+    Qt,
+)
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDateEdit, QFrame, QHBoxLayout,
-    QLabel, QLineEdit, QMenu, QPushButton, QSlider, QSystemTrayIcon,
-    QTimeEdit, QVBoxLayout, QWidget, QStyle, QInputDialog,
-    QDialog, QDialogButtonBox, QFormLayout, QSpinBox,
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDateEdit,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QMessageBox,
+    QPushButton,
+    QSystemTrayIcon,
+    QTimeEdit,
+    QVBoxLayout,
+    QWidget,
+    QStyle,
 )
 
 try:
@@ -19,16 +44,22 @@ try:
 except ImportError:
     Notification = None
 
+
+APP_NAME = "Sticky Todo"
 DATA = Path.home() / ".sticky_todo.json"
 SETTINGS = QSettings("DeathKernel", "StickyTodo")
 
 user32 = ctypes.windll.user32
 DESKTOP_CLASSES = {"Progman", "WorkerW"}
-HOTKEY_ID = 0x53544943  # STIC
+
+HOTKEY_ID = 0x53544943
 WM_HOTKEY = 0x0312
 MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
 VK_SPACE = 0x20
+
+CATEGORIES = ["Personal", "Work", "Study", "Coding"]
+PRIORITIES = ["Low", "Medium", "High"]
 
 
 def window_class(hwnd):
@@ -39,70 +70,82 @@ def window_class(hwnd):
     return buffer.value
 
 
+def new_task(text, category="Personal", priority="Medium", due_date="", reminder=""):
+    return {
+        "id": uuid.uuid4().hex,
+        "text": text,
+        "done": False,
+        "category": category,
+        "priority": priority,
+        "due_date": due_date,
+        "reminder": reminder,
+        "notified": False,
+    }
+
+
 class GlobalHotkeyFilter(QAbstractNativeEventFilter):
     def __init__(self, callback):
         super().__init__()
         self.callback = callback
 
-    def nativeEventFilter(self, eventType, message):
-        if eventType in (b"windows_generic_MSG", b"windows_dispatcher_MSG"):
-            msg = wintypes.MSG.from_address(int(message))
-            if msg.message == WM_HOTKEY and msg.wParam == HOTKEY_ID:
-                self.callback()
-                return True, 0
+    def nativeEventFilter(self, event_type, message):
+        if event_type in ("windows_generic_MSG", "windows_dispatcher_MSG",
+                          b"windows_generic_MSG", b"windows_dispatcher_MSG"):
+            try:
+                msg = wintypes.MSG.from_address(int(message))
+                if msg.message == WM_HOTKEY and msg.wParam == HOTKEY_ID:
+                    self.callback()
+                    return True, 0
+            except (TypeError, ValueError, OSError):
+                pass
         return False, 0
 
 
 class TodoWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.hotkey_filter = GlobalHotkeyFilter(self.quick_add)
-        QApplication.instance().installNativeEventFilter(self.hotkey_filter)
-        user32.RegisterHotKey(None, HOTKEY_ID, MOD_CONTROL | MOD_SHIFT, VK_SPACE)
 
         self.tasks = self.load()
-        self.drag_pos = None
-        self.desktop_only = True
+        self.search_query = ""
+        self.category_filter = "All categories"
         self.manual_hide = False
+        self.desktop_only = True
+        self.drag_pos = None
+        self.hotkey_registered = False
+        self.mini_button = None
 
-        self.setWindowTitle("Sticky Todo")
+        self.setWindowTitle(APP_NAME)
         self.setWindowFlags(
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.resize(430, 570)
+        self.resize(360, 460)
 
         saved_pos = SETTINGS.value("position")
         if isinstance(saved_pos, QPoint):
             self.move(saved_pos)
         else:
             screen = QApplication.primaryScreen().availableGeometry()
-            self.move(screen.right() - self.width() - 28, screen.top() + 80)
+            self.move(
+                screen.right() - self.width() - 28,
+                screen.top() + 80,
+            )
 
         self.build()
-        self.mini_button = QPushButton("✓", self)
-        self.mini_button.setFixedSize(56, 56)
-        self.mini_button.setToolTip("Restore Sticky Todo")
-        self.mini_button.setStyleSheet(
-            """
-            QPushButton {
-                background: #17191f;
-                color: #7c83ff;
-                border: 2px solid #343842;
-                border-radius: 28px;
-                font-size: 22px;
-                font-weight: 700;
-            }
-            QPushButton:hover {
-                background: #22252d;
-                border-color: #5965ff;
-            }
-            """
-        )
-        self.mini_button.clicked.connect(self.restore_from_mini)
-        self.mini_button.hide()
+        self.create_minimize_icon()
         self.apply_opacity()
         self.render()
+
+        self.hotkey_filter = GlobalHotkeyFilter(self.quick_add)
+        QApplication.instance().installNativeEventFilter(self.hotkey_filter)
+        self.hotkey_registered = bool(
+            user32.RegisterHotKey(
+                None,
+                HOTKEY_ID,
+                MOD_CONTROL | MOD_SHIFT,
+                VK_SPACE,
+            )
+        )
 
         self.desktop_timer = QTimer(self)
         self.desktop_timer.setInterval(250)
@@ -117,83 +160,46 @@ class TodoWindow(QWidget):
     def load(self):
         try:
             data = json.loads(DATA.read_text(encoding="utf-8"))
-            if not isinstance(data, list):
-                return []
-            for task in data:
-                task.setdefault("priority", "Medium")
-                task.setdefault("due_date", "")
-                task.setdefault("reminder", "")
-                task.setdefault("notified", False)
-                task.setdefault("category", "Personal")
-            return data
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return []
 
+        if not isinstance(data, list):
+            return []
+
+        changed = False
+        for task in data:
+            if not isinstance(task, dict):
+                continue
+            if not task.get("id"):
+                task["id"] = uuid.uuid4().hex
+                changed = True
+            task.setdefault("text", "")
+            task.setdefault("done", False)
+            task.setdefault("category", "Personal")
+            task.setdefault("priority", "Medium")
+            task.setdefault("due_date", "")
+            task.setdefault("reminder", "")
+            task.setdefault("notified", False)
+
+        if changed:
+            try:
+                DATA.write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+
+        return [task for task in data if isinstance(task, dict)]
+
     def save(self):
-        DATA.write_text(
-            json.dumps(self.tasks, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-
-    def quick_add(self):
-        # Keep the main widget desktop-only. Quick Add uses a tiny transient
-        # dialog so the global shortcut also works while another app is open.
-        text, ok = QInputDialog.getText(
-            None,
-            "Sticky • Quick Add",
-            "Task:",
-            QLineEdit.Normal,
-            "",
-        )
-        if ok and text.strip():
-            self.tasks.append({
-                "text": text.strip(),
-                "done": False,
-                "priority": "Medium",
-                "due_date": date.today().isoformat(),
-                "reminder": "",
-                "notified": False,
-                "category": "Personal",
-            })
-            self.save()
-            self.render()
-
-    def minimize_to_icon(self):
-        """Collapse Sticky into a small floating desktop icon."""
-        if self.mini_button.isVisible():
-            return
-        self.card.hide()
-        self.mini_button.show()
-        self.resize(64, 64)
-        self.setMinimumSize(0, 0)
-        self.adjustSize()
-
-    def restore_from_mini(self):
-        """Restore the full Sticky Todo window from its desktop icon."""
-        self.mini_button.hide()
-        self.card.show()
-        self.resize(430, 570)
-        self.raise_()
-        self.activateWindow()
-
-    def update_desktop_visibility(self):
-        if not self.desktop_only:
-            return
-
-        hwnd = user32.GetForegroundWindow()
-        own_hwnd = int(self.winId())
-        active_class = window_class(hwnd)
-
-        if hwnd == own_hwnd:
-            return
-
-        on_desktop = active_class in DESKTOP_CLASSES
-
-        if on_desktop and not self.manual_hide:
-            if not self.isVisible():
-                self.show()
-        elif not on_desktop and self.isVisible():
-            self.hide()
+        try:
+            DATA.write_text(
+                json.dumps(self.tasks, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
 
     def build(self):
         self.setStyleSheet(
@@ -209,19 +215,19 @@ class TodoWindow(QWidget):
             }
             QPushButton {
                 background: transparent;
-                color: #a1a1aa;
+                color: #9b9da5;
                 border: 0;
                 border-radius: 8px;
-                padding: 6px;
+                padding: 5px;
             }
             QPushButton:hover {
-                background: #24272d;
+                background: #25282e;
                 color: #ffffff;
             }
             QCheckBox {
                 color: #f4f4f5;
-                spacing: 10px;
-                padding: 8px 4px;
+                spacing: 9px;
+                padding: 7px 3px;
                 font-size: 13px;
             }
             QLineEdit, QComboBox, QDateEdit, QTimeEdit {
@@ -234,47 +240,6 @@ class TodoWindow(QWidget):
             QDialog {
                 background: #15171b;
             }
-            """
-        )
-
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(7, 7, 7, 7)
-        self.card = QFrame()
-        self.card.setObjectName("card")
-        outer.addWidget(self.card)
-
-        root = QVBoxLayout(self.card)
-        root.setContentsMargins(12, 10, 12, 12)
-        root.setSpacing(6)
-
-        header = QHBoxLayout()
-        title = QLabel("✓  Sticky")
-        title.setStyleSheet("font-size: 14px; font-weight: 700; color: #ffffff;")
-        header.addWidget(title)
-        header.addStretch()
-
-        add = QPushButton("+")
-        add.setFixedSize(30, 30)
-        add.setToolTip("Add task")
-        add.clicked.connect(self.open_task_dialog)
-        header.addWidget(add)
-
-        more = QPushButton("•••")
-        more.setFixedSize(34, 30)
-        more.setToolTip("More")
-        more.clicked.connect(self.open_more_menu)
-        header.addWidget(more)
-        root.addLayout(header)
-
-        self.list_layout = QVBoxLayout()
-        self.list_layout.setContentsMargins(0, 2, 0, 0)
-        self.list_layout.setSpacing(1)
-        root.addLayout(self.list_layout)
-
-    def open_more_menu(self):
-        menu = QMenu(self)
-        menu.setStyleSheet(
-            """
             QMenu {
                 background: #202329;
                 color: #f4f4f5;
@@ -285,100 +250,216 @@ class TodoWindow(QWidget):
                 padding: 7px 22px 7px 10px;
                 border-radius: 6px;
             }
-            QMenu::item:selected { background: #30343b; }
+            QMenu::item:selected {
+                background: #30343b;
+            }
             """
         )
 
-        search_action = menu.addAction("Search tasks")
-        search_action.triggered.connect(self.search_tasks)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(7, 7, 7, 7)
 
-        filter_action = menu.addAction("Filter category")
-        filter_action.triggered.connect(self.filter_tasks)
+        self.card = QFrame()
+        self.card.setObjectName("card")
+        outer.addWidget(self.card)
+
+        root = QVBoxLayout(self.card)
+        root.setContentsMargins(13, 11, 13, 12)
+        root.setSpacing(5)
+
+        header = QHBoxLayout()
+        title = QLabel("✓  Sticky")
+        title.setStyleSheet(
+            "font-size: 14px; font-weight: 700; color: #ffffff;"
+        )
+        header.addWidget(title)
+        header.addStretch()
+
+        add_button = QPushButton("+")
+        add_button.setFixedSize(30, 30)
+        add_button.setToolTip("Add task")
+        add_button.clicked.connect(self.open_task_dialog)
+        header.addWidget(add_button)
+
+        more_button = QPushButton("•••")
+        more_button.setFixedSize(34, 30)
+        more_button.setToolTip("Options")
+        more_button.clicked.connect(
+            lambda: self.open_more_menu(more_button)
+        )
+        header.addWidget(more_button)
+
+        root.addLayout(header)
+
+        self.list_layout = QVBoxLayout()
+        self.list_layout.setContentsMargins(0, 3, 0, 0)
+        self.list_layout.setSpacing(1)
+        root.addLayout(self.list_layout)
+
+    def create_minimize_icon(self):
+        self.mini_button = QPushButton("✓", self)
+        self.mini_button.setFixedSize(58, 58)
+        self.mini_button.setToolTip("Restore Sticky Todo")
+        self.mini_button.setStyleSheet(
+            """
+            QPushButton {
+                background: #15171b;
+                color: #8b92ff;
+                border: 2px solid #30343b;
+                border-radius: 29px;
+                font-size: 21px;
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                background: #202329;
+                border-color: #5965ff;
+            }
+            """
+        )
+        self.mini_button.clicked.connect(self.restore_from_mini)
+        self.mini_button.hide()
+
+    def open_more_menu(self, button):
+        menu = QMenu(self)
+
+        search = menu.addAction("Search")
+        search.triggered.connect(self.search_tasks)
+
+        category = menu.addAction("Filter category")
+        category.triggered.connect(self.filter_tasks)
+
+        clear_filter = menu.addAction("Clear filters")
+        clear_filter.triggered.connect(self.clear_filters)
 
         menu.addSeparator()
 
-        clear = menu.addAction("Clear completed")
-        clear.triggered.connect(self.clear_completed)
+        clear_completed = menu.addAction("Clear completed")
+        clear_completed.triggered.connect(self.clear_completed)
 
         opacity = menu.addAction("Opacity")
         opacity.triggered.connect(self.change_opacity_dialog)
 
         menu.addSeparator()
-        menu.addAction("Minimize to icon", self.minimize_to_icon)
-        menu.exec(self.sender().mapToGlobal(self.sender().rect().bottomLeft()))
+
+        minimize = menu.addAction("Minimize to icon")
+        minimize.triggered.connect(self.minimize_to_icon)
+
+        hide = menu.addAction("Hide")
+        hide.triggered.connect(self.hide_from_desktop)
+
+        menu.addSeparator()
+
+        quit_action = menu.addAction("Quit")
+        quit_action.triggered.connect(QApplication.instance().quit)
+
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
 
     def search_tasks(self):
         text, ok = QInputDialog.getText(
-            self, "Search", "Find task:", QLineEdit.Normal, ""
+            self,
+            "Search",
+            "Find task:",
+            QLineEdit.Normal,
+            self.search_query,
         )
         if ok:
             self.search_query = text.strip().lower()
             self.render()
 
     def filter_tasks(self):
-        choices = ["All categories", "Personal", "Work", "Study", "Coding"]
-        current = getattr(self, "category_filter", "All categories")
+        choices = ["All categories"] + CATEGORIES
+        current = self.category_filter
+        index = choices.index(current) if current in choices else 0
+
         choice, ok = QInputDialog.getItem(
-            self, "Category", "Show:", choices, choices.index(current), False
+            self,
+            "Category",
+            "Show:",
+            choices,
+            index,
+            False,
         )
         if ok:
             self.category_filter = choice
             self.render()
 
+    def clear_filters(self):
+        self.search_query = ""
+        self.category_filter = "All categories"
+        self.render()
+
     def change_opacity_dialog(self):
+        current = int(SETTINGS.value("opacity", 96))
         value, ok = QInputDialog.getInt(
-            self, "Opacity", "Opacity (%):",
-            int(SETTINGS.value("opacity", 96)), 55, 100, 1
+            self,
+            "Opacity",
+            "Opacity (%):",
+            current,
+            55,
+            100,
+            1,
         )
         if ok:
             SETTINGS.setValue("opacity", value)
             self.setWindowOpacity(value / 100)
 
-    def open_task_dialog(self, idx=None):
-        editing = idx is not None
-        if editing and not (0 <= idx < len(self.tasks)):
+    def open_task_dialog(self, task_id=None):
+        editing = task_id is not None
+        task = self.find_task(task_id) if editing else None
+        if editing and task is None:
             return
-        task = self.tasks[idx] if editing else {}
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Edit task" if editing else "Add task")
-        dialog.setMinimumWidth(320)
+        dialog.setMinimumWidth(340)
 
         form = QFormLayout(dialog)
-        text = QLineEdit(task.get("text", ""))
-        text.setPlaceholderText("Task")
+        form.setContentsMargins(18, 16, 18, 16)
+        form.setSpacing(9)
+
+        text = QLineEdit(task.get("text", "") if task else "")
+        text.setPlaceholderText("What needs to be done?")
         form.addRow("Task", text)
 
         category = QComboBox()
-        category.addItems(["Personal", "Work", "Study", "Coding"])
-        category.setCurrentText(task.get("category", "Personal"))
+        category.addItems(CATEGORIES)
+        category.setCurrentText(
+            task.get("category", "Personal") if task else "Personal"
+        )
         form.addRow("Category", category)
 
         priority = QComboBox()
-        priority.addItems(["Low", "Medium", "High"])
-        priority.setCurrentText(task.get("priority", "Medium"))
+        priority.addItems(PRIORITIES)
+        priority.setCurrentText(
+            task.get("priority", "Medium") if task else "Medium"
+        )
         form.addRow("Priority", priority)
 
-        due = QDateEdit()
+        due_enabled = QCheckBox("Set due date")
+        due_enabled.setChecked(bool(task and task.get("due_date")))
+        form.addRow("", due_enabled)
+
+        due = QDateEdit(QDate.currentDate())
         due.setCalendarPopup(True)
         due.setDisplayFormat("dd MMM yyyy")
-        due.setDate(
-            QDate.fromString(task.get("due_date", ""), "yyyy-MM-dd")
-            if task.get("due_date")
-            else QDate.currentDate()
-        )
+        if task and task.get("due_date"):
+            parsed = QDate.fromString(task["due_date"], "yyyy-MM-dd")
+            if parsed.isValid():
+                due.setDate(parsed)
+        due.setEnabled(due_enabled.isChecked())
+        due_enabled.toggled.connect(due.setEnabled)
         form.addRow("Due", due)
 
         reminder = QTimeEdit()
         reminder.setDisplayFormat("HH:mm")
         reminder.setSpecialValueText("No reminder")
         reminder.setTime(QTime(0, 0))
-        raw_reminder = task.get("reminder", "")
-        if raw_reminder:
-            try:
-                reminder.setTime(QTime.fromString(raw_reminder[-5:], "HH:mm"))
-            except Exception:
-                pass
+        if task and task.get("reminder"):
+            parsed_time = QTime.fromString(task["reminder"][-5:], "HH:mm")
+            if parsed_time.isValid():
+                reminder.setTime(parsed_time)
+        reminder.setEnabled(due_enabled.isChecked())
+        due_enabled.toggled.connect(reminder.setEnabled)
         form.addRow("Reminder", reminder)
 
         buttons = QDialogButtonBox(
@@ -391,97 +472,132 @@ class TodoWindow(QWidget):
         text.selectAll()
         text.setFocus()
 
-        if dialog.exec() != QDialog.Accepted or not text.text().strip():
+        if dialog.exec() != QDialog.Accepted:
             return
 
-        due_value = due.date().toString("yyyy-MM-dd")
+        task_text = text.text().strip()
+        if not task_text:
+            QMessageBox.warning(dialog, "Missing task", "Enter a task name.")
+            return
+
+        due_value = (
+            due.date().toString("yyyy-MM-dd")
+            if due_enabled.isChecked()
+            else ""
+        )
         reminder_time = reminder.time().toString("HH:mm")
-        reminder_value = "" if reminder_time == "00:00" else f"{due_value} {reminder_time}"
+        reminder_value = (
+            f"{due_value} {reminder_time}"
+            if due_value and reminder_time != "00:00"
+            else ""
+        )
 
         if editing:
-            self.tasks[idx].update({
-                "text": text.text().strip(),
-                "category": category.currentText(),
-                "priority": priority.currentText(),
-                "due_date": due_value,
-                "reminder": reminder_value,
-                "notified": False,
-            })
+            task.update(
+                {
+                    "text": task_text,
+                    "category": category.currentText(),
+                    "priority": priority.currentText(),
+                    "due_date": due_value,
+                    "reminder": reminder_value,
+                    "notified": False,
+                }
+            )
         else:
-            self.tasks.append({
-                "text": text.text().strip(),
-                "done": False,
-                "category": category.currentText(),
-                "priority": priority.currentText(),
-                "due_date": due_value,
-                "reminder": reminder_value,
-                "notified": False,
-            })
+            self.tasks.append(
+                new_task(
+                    task_text,
+                    category.currentText(),
+                    priority.currentText(),
+                    due_value,
+                    reminder_value,
+                )
+            )
 
         self.save()
         self.render()
+
+    def find_task(self, task_id):
+        for task in self.tasks:
+            if task.get("id") == task_id:
+                return task
+        return None
 
     def render(self):
         while self.list_layout.count():
             item = self.list_layout.takeAt(0)
             widget = item.widget()
+            layout = item.layout()
             if widget:
                 widget.deleteLater()
-            elif item.layout():
-                child = item.layout()
-                while child.count():
-                    sub = child.takeAt(0)
-                    if sub.widget():
-                        sub.widget().deleteLater()
+            elif layout:
+                while layout.count():
+                    child = layout.takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
 
-        query = getattr(self, "search_query", "")
-        category_filter = getattr(self, "category_filter", "All categories")
+        query = self.search_query
+        category = self.category_filter
+
         visible = []
-        for i, task in enumerate(self.tasks):
+        for task in self.tasks:
             if query and query not in task.get("text", "").lower():
                 continue
-            if category_filter != "All categories" and task.get("category", "Personal") != category_filter:
+            if (
+                category != "All categories"
+                and task.get("category", "Personal") != category
+            ):
                 continue
-            visible.append((i, task))
+            visible.append(task)
 
-        pending = [(i, t) for i, t in visible if not t.get("done")]
-        completed = [(i, t) for i, t in visible if t.get("done")]
+        pending = [task for task in visible if not task.get("done")]
+        completed = [task for task in visible if task.get("done")]
         today = date.today().isoformat()
 
-        def sort_key(item):
-            _, task = item
+        def sort_key(task):
             due = task.get("due_date") or "9999-12-31"
-            return (0 if due == today else 1, due)
+            return (0 if due == today else 1, due, task.get("text", "").lower())
 
         pending.sort(key=sort_key)
-        completed.sort(key=lambda item: item[1].get("due_date") or "9999-12-31")
+        completed.sort(key=lambda t: t.get("text", "").lower())
 
         if not visible:
             empty = QLabel("No tasks")
             empty.setAlignment(Qt.AlignCenter)
-            empty.setStyleSheet("color:#71717a; padding:18px;")
+            empty.setStyleSheet(
+                "color:#71717a; padding:24px 8px; font-size:12px;"
+            )
             self.list_layout.addWidget(empty)
             return
 
-        for idx, task in pending:
-            self.add_task_row(idx, task)
+        for task in pending:
+            self.add_task_row(task)
 
         if completed:
             label = QLabel("Completed")
-            label.setStyleSheet("color:#52525b; font-size:10px; margin:8px 4px 3px;")
+            label.setStyleSheet(
+                "color:#52525b; font-size:10px; margin:8px 4px 3px;"
+            )
             self.list_layout.addWidget(label)
-            for idx, task in completed:
-                self.add_task_row(idx, task)
+            for task in completed:
+                self.add_task_row(task)
 
-    def add_task_row(self, idx, task):
+    def add_task_row(self, task):
         row = QHBoxLayout()
         row.setContentsMargins(2, 1, 2, 1)
+        row.setSpacing(2)
 
         box = QCheckBox(task.get("text", ""))
         box.setChecked(bool(task.get("done")))
-        box.stateChanged.connect(lambda state, index=idx: self.toggle(index, state))
+        task_id = task.get("id")
+        box.stateChanged.connect(
+            lambda state, tid=task_id: self.toggle(tid, state)
+        )
+
         if task.get("done"):
-            box.setStyleSheet("color:#666a73; text-decoration:line-through;")
+            box.setStyleSheet(
+                "color:#666a73; text-decoration:line-through;"
+            )
 
         row.addWidget(box, 1)
 
@@ -489,40 +605,99 @@ class TodoWindow(QWidget):
         menu_button.setFixedSize(30, 30)
         menu_button.setToolTip("Task options")
         menu_button.clicked.connect(
-            lambda _, index=idx, button=menu_button: self.task_menu(index, button)
+            lambda _, tid=task_id, button=menu_button:
+            self.task_menu(tid, button)
         )
         row.addWidget(menu_button)
+
         self.list_layout.addLayout(row)
 
-    def task_menu(self, idx, button):
-        if not (0 <= idx < len(self.tasks)):
+    def task_menu(self, task_id, button):
+        task = self.find_task(task_id)
+        if task is None:
             return
+
         menu = QMenu(self)
+
         edit = menu.addAction("Edit")
-        edit.triggered.connect(lambda: self.open_task_dialog(idx))
+        edit.triggered.connect(
+            lambda: self.open_task_dialog(task_id)
+        )
+
+        toggle = menu.addAction(
+            "Mark incomplete" if task.get("done") else "Mark complete"
+        )
+        toggle.triggered.connect(
+            lambda: self.toggle(task_id, not task.get("done"))
+        )
+
         delete = menu.addAction("Delete")
-        delete.triggered.connect(lambda: self.remove(idx))
+        delete.triggered.connect(
+            lambda: self.remove(task_id)
+        )
+
         menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
 
-    def add_task(self):
-        self.open_task_dialog()
+    def quick_add(self):
+        text, ok = QInputDialog.getText(
+            None,
+            "Sticky • Quick Add",
+            "Task:",
+            QLineEdit.Normal,
+            "",
+        )
+        if not ok or not text.strip():
+            return
 
-    def toggle(self, idx, state):
-        if 0 <= idx < len(self.tasks):
-            self.tasks[idx]["done"] = bool(state)
-            self.save()
-            self.render()
+        self.tasks.append(new_task(text.strip()))
+        self.save()
+        self.render()
 
-    def remove(self, idx):
-        if 0 <= idx < len(self.tasks):
-            self.tasks.pop(idx)
+    def toggle(self, task_id, state):
+        task = self.find_task(task_id)
+        if task is None:
+            return
+        task["done"] = bool(state)
+        self.save()
+        self.render()
+
+    def remove(self, task_id):
+        task = self.find_task(task_id)
+        if task is None:
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Delete task",
+            f'Delete "{task.get("text", "this task")}"?',
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self.tasks = [
+                item for item in self.tasks
+                if item.get("id") != task_id
+            ]
             self.save()
             self.render()
 
     def clear_completed(self):
-        self.tasks = [task for task in self.tasks if not task.get("done")]
-        self.save()
-        self.render()
+        if not any(task.get("done") for task in self.tasks):
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Clear completed",
+            "Remove all completed tasks?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self.tasks = [
+                task for task in self.tasks if not task.get("done")
+            ]
+            self.save()
+            self.render()
 
     def check_reminders(self):
         if not Notification:
@@ -532,22 +707,28 @@ class TodoWindow(QWidget):
         changed = False
 
         for task in self.tasks:
-            if task.get("done") or task.get("notified") or not task.get("reminder"):
+            if (
+                task.get("done")
+                or task.get("notified")
+                or not task.get("reminder")
+            ):
                 continue
 
             try:
-                reminder_at = datetime.strptime(task["reminder"], "%Y-%m-%d %H:%M")
+                reminder_at = datetime.strptime(
+                    task["reminder"],
+                    "%Y-%m-%d %H:%M",
+                )
             except (TypeError, ValueError):
                 continue
 
             if reminder_at <= now:
                 try:
-                    toast = Notification(
-                        app_id="Sticky Todo",
+                    Notification(
+                        app_id=APP_NAME,
                         title="Sticky Todo reminder",
                         msg=task.get("text", "Task due"),
-                    )
-                    toast.show()
+                    ).show()
                 except Exception:
                     continue
 
@@ -556,79 +737,135 @@ class TodoWindow(QWidget):
 
         if changed:
             self.save()
-            self.render()
 
-    def opacity_changed(self, value):
-        SETTINGS.setValue("opacity", value)
-        self.apply_opacity()
+    def minimize_to_icon(self):
+        if self.mini_button.isVisible():
+            return
+
+        self.card.hide()
+        self.mini_button.show()
+        self.resize(72, 72)
+
+    def restore_from_mini(self):
+        self.mini_button.hide()
+        self.card.show()
+        self.resize(360, 460)
+        self.raise_()
+        self.activateWindow()
+
+    def update_desktop_visibility(self):
+        if not self.desktop_only:
+            return
+
+        hwnd = user32.GetForegroundWindow()
+        own_hwnd = int(self.winId())
+
+        if hwnd == own_hwnd:
+            return
+
+        on_desktop = window_class(hwnd) in DESKTOP_CLASSES
+
+        if on_desktop and not self.manual_hide:
+            if not self.isVisible():
+                self.show()
+        elif not on_desktop and self.isVisible():
+            self.hide()
 
     def apply_opacity(self):
         value = int(SETTINGS.value("opacity", 96))
+        value = max(55, min(100, value))
         self.setWindowOpacity(value / 100)
-        if hasattr(self, "opacity_value"):
-            self.opacity_value.setText(f"{value}%")
-
-    def moveEvent(self, event):
-        SETTINGS.setValue("position", self.pos())
-        super().moveEvent(event)
 
     def hide_from_desktop(self):
         self.manual_hide = True
         self.hide()
 
+    def show_from_tray(self):
+        self.manual_hide = False
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def moveEvent(self, event):
+        if not self.mini_button or not self.mini_button.isVisible():
+            SETTINGS.setValue("position", self.pos())
+        super().moveEvent(event)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.drag_pos = (
-                event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                event.globalPosition().toPoint()
+                - self.frameGeometry().topLeft()
             )
             event.accept()
+            return
+        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self.drag_pos is not None and event.buttons() & Qt.LeftButton:
-            self.move(event.globalPosition().toPoint() - self.drag_pos)
+        if (
+            self.drag_pos is not None
+            and event.buttons() & Qt.LeftButton
+        ):
+            self.move(
+                event.globalPosition().toPoint() - self.drag_pos
+            )
             event.accept()
+            return
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         self.drag_pos = None
         super().mouseReleaseEvent(event)
 
+    def cleanup(self):
+        if self.hotkey_registered:
+            user32.UnregisterHotKey(None, HOTKEY_ID)
+            self.hotkey_registered = False
+        try:
+            QApplication.instance().removeNativeEventFilter(
+                self.hotkey_filter
+            )
+        except Exception:
+            pass
+
 
 def request_quit():
-    """Gracefully stop the Qt event loop so Ctrl+C exits once."""
     app.quit()
 
 
 app = QApplication(sys.argv)
+app.setApplicationName(APP_NAME)
 app.setQuitOnLastWindowClosed(False)
 
-# Qt's event loop can keep running after Python raises KeyboardInterrupt from
-# a timer callback. Handle Ctrl+C at the process level and ask Qt to exit.
 signal.signal(signal.SIGINT, lambda signum, frame: request_quit())
 
 window = TodoWindow()
+app.aboutToQuit.connect(window.cleanup)
 window.show()
 
 tray = QSystemTrayIcon(window)
-tray.setToolTip("Sticky Todo")
-
-# Give the tray icon an explicit icon to avoid the Qt warning and make the
-# tray entry visible on Windows even though Sticky currently has no .ico file.
-tray.setIcon(app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon))
+tray.setToolTip(APP_NAME)
+tray.setIcon(
+    app.style().standardIcon(
+        QStyle.StandardPixmap.SP_ComputerIcon
+    )
+)
 
 menu = QMenu()
 show_action = menu.addAction("Show Sticky")
-show_action.triggered.connect(
-    lambda: (setattr(window, "manual_hide", False), window.show())
-)
+show_action.triggered.connect(window.show_from_tray)
+
 hide_action = menu.addAction("Hide Sticky")
 hide_action.triggered.connect(window.hide_from_desktop)
+
 menu.addSeparator()
+
 quit_action = menu.addAction("Quit")
 quit_action.triggered.connect(app.quit)
 
 tray.setContextMenu(menu)
 tray.activated.connect(
-    lambda reason: window.show()
+    lambda reason: window.show_from_tray()
     if reason == QSystemTrayIcon.DoubleClick
     else None
 )
