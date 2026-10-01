@@ -935,6 +935,15 @@ class TodoWindow(QWidget):
         if not self.desktop_only:
             return
 
+        # Never hide the main window while one of its dialogs/message boxes
+        # is active. Otherwise Edit/Delete can make the whole app disappear
+        # because the dialog becomes the foreground window for a moment.
+        modal = QApplication.activeModalWidget()
+        while modal is not None:
+            if modal is self or modal.parentWidget() is self:
+                return
+            modal = modal.parentWidget()
+
         hwnd = user32.GetForegroundWindow()
         own_hwnd = int(self.winId())
 
