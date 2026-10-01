@@ -9,7 +9,7 @@ from PySide6.QtCore import QPoint, Qt, QDate, QTime, QSettings, QTimer
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDateEdit, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QMenu, QPushButton, QSlider, QSystemTrayIcon,
-    QTimeEdit, QVBoxLayout, QWidget,
+    QTimeEdit, QVBoxLayout, QWidget, QStyle,
 )
 
 try:
@@ -476,7 +476,7 @@ tray.setToolTip("Sticky Todo")
 
 # Give the tray icon an explicit icon to avoid the Qt warning and make the
 # tray entry visible on Windows even though Sticky currently has no .ico file.
-tray.setIcon(app.style().standardIcon(app.style().SP_ComputerIcon))
+tray.setIcon(app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon))
 
 menu = QMenu()
 show_action = menu.addAction("Show Sticky")
