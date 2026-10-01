@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDateEdit, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QMenu, QPushButton, QSlider, QSystemTrayIcon,
     QTimeEdit, QVBoxLayout, QWidget, QStyle, QInputDialog,
+    QDialog, QDialogButtonBox, QFormLayout, QSpinBox,
 )
 
 try:
@@ -145,8 +146,17 @@ class TodoWindow(QWidget):
             "",
         )
         if ok and text.strip():
-            self.input.setText(text.strip())
-            self.add_task()
+            self.tasks.append({
+                "text": text.strip(),
+                "done": False,
+                "priority": "Medium",
+                "due_date": date.today().isoformat(),
+                "reminder": "",
+                "notified": False,
+                "category": "Personal",
+            })
+            self.save()
+            self.render()
 
     def minimize_to_icon(self):
         """Collapse Sticky into a small floating desktop icon."""
@@ -187,159 +197,228 @@ class TodoWindow(QWidget):
             self.hide()
 
     def build(self):
-        self.card = QFrame()
-        self.card.setObjectName("card")
-        self.card.setStyleSheet(
+        self.setStyleSheet(
             """
+            QWidget {
+                color: #f4f4f5;
+                font-family: "Segoe UI";
+            }
             #card {
-                background: #17191f;
-                border: 1px solid #343842;
-                border-radius: 18px;
-            }
-            QLabel { color: #f5f7fb; }
-            QLineEdit, QComboBox, QDateEdit, QTimeEdit {
-                background: #22252d;
-                color: #fff;
-                border: 1px solid #363a45;
-                border-radius: 9px;
-                padding: 8px;
-            }
-            QLineEdit:focus, QComboBox:focus, QDateEdit:focus, QTimeEdit:focus {
-                border: 1px solid #5965ff;
-            }
-            QComboBox QAbstractItemView {
-                background: #22252d;
-                color: #fff;
-                selection-background-color: #383d48;
+                background: #15171b;
+                border: 1px solid #292d33;
+                border-radius: 16px;
             }
             QPushButton {
-                background: #292d36;
-                color: #fff;
+                background: transparent;
+                color: #a1a1aa;
                 border: 0;
-                border-radius: 9px;
-                padding: 7px 10px;
+                border-radius: 8px;
+                padding: 6px;
             }
-            QPushButton:hover { background: #383d48; }
+            QPushButton:hover {
+                background: #24272d;
+                color: #ffffff;
+            }
             QCheckBox {
-                color: #e7e9ee;
-                padding: 7px 3px;
+                color: #f4f4f5;
+                spacing: 10px;
+                padding: 8px 4px;
+                font-size: 13px;
             }
-            QSlider::groove:horizontal {
-                height: 4px;
-                background: #343842;
-                border-radius: 2px;
+            QLineEdit, QComboBox, QDateEdit, QTimeEdit {
+                background: #202329;
+                color: #f4f4f5;
+                border: 1px solid #30343b;
+                border-radius: 8px;
+                padding: 7px;
             }
-            QSlider::handle:horizontal {
-                width: 12px;
-                margin: -4px 0;
-                border-radius: 6px;
-                background: #7c83ff;
+            QDialog {
+                background: #15171b;
             }
             """
         )
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setContentsMargins(7, 7, 7, 7)
+        self.card = QFrame()
+        self.card.setObjectName("card")
         outer.addWidget(self.card)
 
         root = QVBoxLayout(self.card)
-        root.setContentsMargins(18, 16, 18, 18)
-        root.setSpacing(9)
+        root.setContentsMargins(12, 10, 12, 12)
+        root.setSpacing(6)
 
-        top = QHBoxLayout()
-        title = QLabel("✓  STICKY TODO")
-        title.setStyleSheet("font-size: 16px; font-weight: 700;")
-        self.count = QLabel()
-        self.count.setStyleSheet("color:#9ca3af;")
-        minimize = QPushButton("—")
-        minimize.setFixedWidth(30)
-        minimize.clicked.connect(self.minimize_to_icon)
-        close = QPushButton("×")
-        close.setFixedWidth(30)
-        close.clicked.connect(self.hide_from_desktop)
-        top.addWidget(title)
-        top.addStretch()
-        top.addWidget(self.count)
-        top.addWidget(minimize)
-        top.addWidget(close)
-        root.addLayout(top)
+        header = QHBoxLayout()
+        title = QLabel("✓  Sticky")
+        title.setStyleSheet("font-size: 14px; font-weight: 700; color: #ffffff;")
+        header.addWidget(title)
+        header.addStretch()
 
-        add = QHBoxLayout()
-        self.input = QLineEdit()
-        self.input.setPlaceholderText("Add a task…")
-        self.input.returnPressed.connect(self.add_task)
-        btn = QPushButton("+")
-        btn.setFixedWidth(40)
-        btn.clicked.connect(self.add_task)
-        add.addWidget(self.input)
-        add.addWidget(btn)
-        root.addLayout(add)
+        add = QPushButton("+")
+        add.setFixedSize(30, 30)
+        add.setToolTip("Add task")
+        add.clicked.connect(self.open_task_dialog)
+        header.addWidget(add)
 
-        options = QHBoxLayout()
-        self.due_date = QDateEdit(QDate.currentDate())
-        self.due_date.setCalendarPopup(True)
-        self.due_date.setDisplayFormat("dd MMM")
-        self.due_date.setToolTip("Due date")
-
-        self.priority = QComboBox()
-        self.priority.addItems(["Low", "Medium", "High"])
-        self.priority.setCurrentText("Medium")
-        self.priority.setToolTip("Priority")
-
-        self.reminder = QTimeEdit()
-        self.reminder.setDisplayFormat("HH:mm")
-        self.reminder.setTime(QTime(0, 0))
-        self.reminder.setToolTip("Reminder time (today)")
-        self.reminder.setSpecialValueText("No reminder")
-
-        options.addWidget(self.due_date, 2)
-        options.addWidget(self.priority, 1)
-        self.category = QComboBox()
-        self.category.addItems(["Personal", "Work", "Study", "Coding"])
-        self.category.setCurrentText("Personal")
-        self.category.setToolTip("Category")
-
-        options.addWidget(self.reminder, 1)
-        options.addWidget(self.category, 1)
-        root.addLayout(options)
-
-        search_row = QHBoxLayout()
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Search tasks…")
-        self.search.textChanged.connect(self.render)
-        self.filter_category = QComboBox()
-        self.filter_category.addItems(["All categories", "Personal", "Work", "Study", "Coding"])
-        self.filter_category.currentTextChanged.connect(self.render)
-        search_row.addWidget(self.search, 2)
-        search_row.addWidget(self.filter_category, 1)
-        root.addLayout(search_row)
-
-        hint = QLabel("Date • Priority • reminder • category")
-        hint.setStyleSheet("color:#777d89; font-size:10px;")
-        root.addWidget(hint)
+        more = QPushButton("•••")
+        more.setFixedSize(34, 30)
+        more.setToolTip("More")
+        more.clicked.connect(self.open_more_menu)
+        header.addWidget(more)
+        root.addLayout(header)
 
         self.list_layout = QVBoxLayout()
-        self.list_layout.setSpacing(2)
+        self.list_layout.setContentsMargins(0, 2, 0, 0)
+        self.list_layout.setSpacing(1)
         root.addLayout(self.list_layout)
 
-        actions = QHBoxLayout()
-        clear = QPushButton("Clear completed")
-        clear.clicked.connect(self.clear_completed)
-        actions.addWidget(clear)
-        actions.addStretch()
-        root.addLayout(actions)
+    def open_more_menu(self):
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            """
+            QMenu {
+                background: #202329;
+                color: #f4f4f5;
+                border: 1px solid #343840;
+                padding: 5px;
+            }
+            QMenu::item {
+                padding: 7px 22px 7px 10px;
+                border-radius: 6px;
+            }
+            QMenu::item:selected { background: #30343b; }
+            """
+        )
 
-        opacity_row = QHBoxLayout()
-        opacity_row.addWidget(QLabel("Opacity"))
-        self.opacity_value = QLabel()
-        self.opacity_value.setStyleSheet("color:#9ca3af;")
-        self.opacity = QSlider(Qt.Horizontal)
-        self.opacity.setRange(55, 100)
-        self.opacity.setValue(int(SETTINGS.value("opacity", 96)))
-        self.opacity.valueChanged.connect(self.opacity_changed)
-        opacity_row.addWidget(self.opacity)
-        opacity_row.addWidget(self.opacity_value)
-        root.addLayout(opacity_row)
+        search_action = menu.addAction("Search tasks")
+        search_action.triggered.connect(self.search_tasks)
+
+        filter_action = menu.addAction("Filter category")
+        filter_action.triggered.connect(self.filter_tasks)
+
+        menu.addSeparator()
+
+        clear = menu.addAction("Clear completed")
+        clear.triggered.connect(self.clear_completed)
+
+        opacity = menu.addAction("Opacity")
+        opacity.triggered.connect(self.change_opacity_dialog)
+
+        menu.addSeparator()
+        menu.addAction("Minimize to icon", self.minimize_to_icon)
+        menu.exec(self.sender().mapToGlobal(self.sender().rect().bottomLeft()))
+
+    def search_tasks(self):
+        text, ok = QInputDialog.getText(
+            self, "Search", "Find task:", QLineEdit.Normal, ""
+        )
+        if ok:
+            self.search_query = text.strip().lower()
+            self.render()
+
+    def filter_tasks(self):
+        choices = ["All categories", "Personal", "Work", "Study", "Coding"]
+        current = getattr(self, "category_filter", "All categories")
+        choice, ok = QInputDialog.getItem(
+            self, "Category", "Show:", choices, choices.index(current), False
+        )
+        if ok:
+            self.category_filter = choice
+            self.render()
+
+    def change_opacity_dialog(self):
+        value, ok = QInputDialog.getInt(
+            self, "Opacity", "Opacity (%):",
+            int(SETTINGS.value("opacity", 96)), 55, 100, 1
+        )
+        if ok:
+            SETTINGS.setValue("opacity", value)
+            self.setWindowOpacity(value / 100)
+
+    def open_task_dialog(self, idx=None):
+        editing = idx is not None
+        task = self.tasks[idx] if editing else {}
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit task" if editing else "Add task")
+        dialog.setMinimumWidth(320)
+
+        form = QFormLayout(dialog)
+        text = QLineEdit(task.get("text", ""))
+        text.setPlaceholderText("Task")
+        form.addRow("Task", text)
+
+        category = QComboBox()
+        category.addItems(["Personal", "Work", "Study", "Coding"])
+        category.setCurrentText(task.get("category", "Personal"))
+        form.addRow("Category", category)
+
+        priority = QComboBox()
+        priority.addItems(["Low", "Medium", "High"])
+        priority.setCurrentText(task.get("priority", "Medium"))
+        form.addRow("Priority", priority)
+
+        due = QDateEdit()
+        due.setCalendarPopup(True)
+        due.setDisplayFormat("dd MMM yyyy")
+        due.setDate(
+            QDate.fromString(task.get("due_date", ""), "yyyy-MM-dd")
+            if task.get("due_date")
+            else QDate.currentDate()
+        )
+        form.addRow("Due", due)
+
+        reminder = QTimeEdit()
+        reminder.setDisplayFormat("HH:mm")
+        reminder.setSpecialValueText("No reminder")
+        reminder.setTime(QTime(0, 0))
+        raw_reminder = task.get("reminder", "")
+        if raw_reminder:
+            try:
+                reminder.setTime(QTime.fromString(raw_reminder[-5:], "HH:mm"))
+            except Exception:
+                pass
+        form.addRow("Reminder", reminder)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Save | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+
+        text.selectAll()
+        text.setFocus()
+
+        if dialog.exec() != QDialog.Accepted or not text.text().strip():
+            return
+
+        due_value = due.date().toString("yyyy-MM-dd")
+        reminder_time = reminder.time().toString("HH:mm")
+        reminder_value = "" if reminder_time == "00:00" else f"{due_value} {reminder_time}"
+
+        if editing:
+            self.tasks[idx].update({
+                "text": text.text().strip(),
+                "category": category.currentText(),
+                "priority": priority.currentText(),
+                "due_date": due_value,
+                "reminder": reminder_value,
+                "notified": False,
+            })
+        else:
+            self.tasks.append({
+                "text": text.text().strip(),
+                "done": False,
+                "category": category.currentText(),
+                "priority": priority.currentText(),
+                "due_date": due_value,
+                "reminder": reminder_value,
+                "notified": False,
+            })
+
+        self.save()
+        self.render()
 
     def render(self):
         while self.list_layout.count():
@@ -347,9 +426,15 @@ class TodoWindow(QWidget):
             widget = item.widget()
             if widget:
                 widget.deleteLater()
+            elif item.layout():
+                child = item.layout()
+                while child.count():
+                    sub = child.takeAt(0)
+                    if sub.widget():
+                        sub.widget().deleteLater()
 
-        query = self.search.text().strip().lower()
-        category_filter = self.filter_category.currentText()
+        query = getattr(self, "search_query", "")
+        category_filter = getattr(self, "category_filter", "All categories")
         visible = []
         for i, task in enumerate(self.tasks):
             if query and query not in task.get("text", "").lower():
@@ -360,135 +445,63 @@ class TodoWindow(QWidget):
 
         pending = [(i, t) for i, t in visible if not t.get("done")]
         completed = [(i, t) for i, t in visible if t.get("done")]
-
         today = date.today().isoformat()
 
         def sort_key(item):
             _, task = item
             due = task.get("due_date") or "9999-12-31"
-            priority_order = {"High": 0, "Medium": 1, "Low": 2}
-            return (
-                0 if due == today else 1,
-                due,
-                priority_order.get(task.get("priority"), 1),
-            )
+            return (0 if due == today else 1, due)
 
         pending.sort(key=sort_key)
         completed.sort(key=lambda item: item[1].get("due_date") or "9999-12-31")
 
-        done = sum(1 for task in self.tasks if task.get("done"))
-        total = len(self.tasks)
-        self.count.setText(f"{done}/{total} done")
-
-        progress_row = QHBoxLayout()
-        progress_row.addWidget(QLabel(f"Progress {done}/{total}"))
-        progress_bar = QSlider(Qt.Horizontal)
-        progress_bar.setRange(0, max(total, 1))
-        progress_bar.setValue(done)
-        progress_bar.setEnabled(False)
-        progress_row.addWidget(progress_bar)
-        self.list_layout.addLayout(progress_row)
-
         if not visible:
-            message = "No matching tasks." if self.tasks else "No tasks yet. Add something above."
-            empty = QLabel(message)
-            empty.setStyleSheet("color:#777d89; padding:12px 3px;")
+            empty = QLabel("No tasks")
+            empty.setAlignment(Qt.AlignCenter)
+            empty.setStyleSheet("color:#71717a; padding:18px;")
             self.list_layout.addWidget(empty)
+            return
 
-        shown_today_header = False
         for idx, task in pending:
-            if task.get("due_date") == today and not shown_today_header:
-                label = QLabel("TODAY")
-                label.setStyleSheet(
-                    "color:#7c83ff; font-size:11px; font-weight:700; margin-top:5px;"
-                )
-                self.list_layout.addWidget(label)
-                shown_today_header = True
             self.add_task_row(idx, task)
 
         if completed:
-            label = QLabel("COMPLETED")
-            label.setStyleSheet(
-                "color:#777d89; font-size:11px; font-weight:700; margin-top:8px;"
-            )
+            label = QLabel("Completed")
+            label.setStyleSheet("color:#52525b; font-size:10px; margin:8px 4px 3px;")
             self.list_layout.addWidget(label)
             for idx, task in completed:
                 self.add_task_row(idx, task)
 
     def add_task_row(self, idx, task):
         row = QHBoxLayout()
+        row.setContentsMargins(2, 1, 2, 1)
+
         box = QCheckBox(task.get("text", ""))
         box.setChecked(bool(task.get("done")))
-        box.stateChanged.connect(
-            lambda state, index=idx: self.toggle(index, state)
-        )
-
-        priority = task.get("priority", "Medium")
-        due = task.get("due_date", "")
-        reminder = task.get("reminder", "")
-        category = task.get("category", "Personal")
-
-        details = []
-        if due:
-            if due == date.today().isoformat():
-                details.append("Today")
-            else:
-                try:
-                    details.append(datetime.strptime(due, "%Y-%m-%d").strftime("%d %b"))
-                except ValueError:
-                    details.append(due)
-        details.append(priority)
-        details.append(category)
-        if reminder:
-            details.append(f"⏰ {reminder}")
-
-        meta = QLabel("  •  ".join(details))
-        meta.setStyleSheet(
-            "color:#9ca3af; font-size:10px;" +
-            (" text-decoration:line-through;" if task.get("done") else "")
-        )
-
+        box.stateChanged.connect(lambda state, index=idx: self.toggle(index, state))
         if task.get("done"):
-            box.setStyleSheet("color:#777d89; text-decoration:line-through;")
+            box.setStyleSheet("color:#666a73; text-decoration:line-through;")
 
-        delete = QPushButton("×")
-        delete.setFixedWidth(28)
-        delete.clicked.connect(lambda _, index=idx: self.remove(index))
+        row.addWidget(box, 1)
 
-        text_col = QVBoxLayout()
-        text_col.setSpacing(0)
-        text_col.addWidget(box)
-        if details:
-            text_col.addWidget(meta)
-
-        row.addLayout(text_col)
-        row.addStretch()
-        row.addWidget(delete)
+        menu_button = QPushButton("•••")
+        menu_button.setFixedSize(30, 30)
+        menu_button.setToolTip("Task options")
+        menu_button.clicked.connect(
+            lambda _, index=idx, button=menu_button: self.task_menu(index, button)
+        )
+        row.addWidget(menu_button)
         self.list_layout.addLayout(row)
 
-    def add_task(self):
-        text = self.input.text().strip()
-        if not text:
+    def task_menu(self, idx, button):
+        if not (0 <= idx < len(self.tasks)):
             return
-
-        due = self.due_date.date().toString("yyyy-MM-dd")
-        priority = self.priority.currentText()
-        reminder_time = self.reminder.time().toString("HH:mm")
-        reminder = "" if reminder_time == "00:00" else f"{due} {reminder_time}"
-
-        self.tasks.append({
-            "text": text,
-            "done": False,
-            "priority": priority,
-            "due_date": due,
-            "reminder": reminder,
-            "notified": False,
-            "category": self.category.currentText(),
-        })
-        self.input.clear()
-        self.save()
-        self.render()
-        self.input.setFocus()
+        menu = QMenu(self)
+        edit = menu.addAction("Edit")
+        edit.triggered.connect(lambda: self.open_task_dialog(idx))
+        delete = menu.addAction("Delete")
+        delete.triggered.connect(lambda: self.remove(idx))
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
 
     def toggle(self, idx, state):
         if 0 <= idx < len(self.tasks):
