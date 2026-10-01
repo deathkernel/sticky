@@ -497,8 +497,7 @@ class TodoWindow(QWidget):
                 changed = True
 
         if changed:
-            user32.UnregisterHotKey(None, HOTKEY_ID)
-        self.save()
+            self.save()
             self.render()
 
     def opacity_changed(self, value):
