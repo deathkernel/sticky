@@ -77,7 +77,7 @@ class TodoWindow(QWidget):
                 task.setdefault("priority", "Medium")
                 task.setdefault("due_date", "")
                 task.setdefault("reminder", "")
-                task.setdefault("notified", False)
+                task.setdefault("notified", False)\n                task.setdefault("category", "Personal")
             return data
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return []
@@ -215,10 +215,27 @@ class TodoWindow(QWidget):
 
         options.addWidget(self.due_date, 2)
         options.addWidget(self.priority, 1)
+        self.category = QComboBox()
+        self.category.addItems(["Personal", "Work", "Study", "Coding"])
+        self.category.setCurrentText("Personal")
+        self.category.setToolTip("Category")
+
         options.addWidget(self.reminder, 1)
+        options.addWidget(self.category, 1)
         root.addLayout(options)
 
-        hint = QLabel("Date • Priority • reminder time")
+        search_row = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search tasks…")
+        self.search.textChanged.connect(self.render)
+        self.filter_category = QComboBox()
+        self.filter_category.addItems(["All categories", "Personal", "Work", "Study", "Coding"])
+        self.filter_category.currentTextChanged.connect(self.render)
+        search_row.addWidget(self.search, 2)
+        search_row.addWidget(self.filter_category, 1)
+        root.addLayout(search_row)
+
+        hint = QLabel("Date • Priority • reminder • category")
         hint.setStyleSheet("color:#777d89; font-size:10px;")
         root.addWidget(hint)
 
@@ -252,8 +269,18 @@ class TodoWindow(QWidget):
             if widget:
                 widget.deleteLater()
 
-        pending = [(i, t) for i, t in enumerate(self.tasks) if not t.get("done")]
-        completed = [(i, t) for i, t in enumerate(self.tasks) if t.get("done")]
+        query = self.search.text().strip().lower()
+        category_filter = self.filter_category.currentText()
+        visible = []
+        for i, task in enumerate(self.tasks):
+            if query and query not in task.get("text", "").lower():
+                continue
+            if category_filter != "All categories" and task.get("category", "Personal") != category_filter:
+                continue
+            visible.append((i, task))
+
+        pending = [(i, t) for i, t in visible if not t.get("done")]
+        completed = [(i, t) for i, t in visible if t.get("done")]
 
         today = date.today().isoformat()
 
@@ -270,11 +297,22 @@ class TodoWindow(QWidget):
         pending.sort(key=sort_key)
         completed.sort(key=lambda item: item[1].get("due_date") or "9999-12-31")
 
-        done = len(completed)
-        self.count.setText(f"{done}/{len(self.tasks)} done")
+        done = sum(1 for task in self.tasks if task.get("done"))
+        total = len(self.tasks)
+        self.count.setText(f"{done}/{total} done")
 
-        if not self.tasks:
-            empty = QLabel("No tasks yet. Add something above.")
+        progress_row = QHBoxLayout()
+        progress_row.addWidget(QLabel(f"Progress {done}/{total}"))
+        progress_bar = QSlider(Qt.Horizontal)
+        progress_bar.setRange(0, max(total, 1))
+        progress_bar.setValue(done)
+        progress_bar.setEnabled(False)
+        progress_row.addWidget(progress_bar)
+        self.list_layout.addLayout(progress_row)
+
+        if not visible:
+            message = "No matching tasks." if self.tasks else "No tasks yet. Add something above."
+            empty = QLabel(message)
             empty.setStyleSheet("color:#777d89; padding:12px 3px;")
             self.list_layout.addWidget(empty)
 
@@ -309,6 +347,7 @@ class TodoWindow(QWidget):
         priority = task.get("priority", "Medium")
         due = task.get("due_date", "")
         reminder = task.get("reminder", "")
+        category = task.get("category", "Personal")
 
         details = []
         if due:
@@ -320,6 +359,7 @@ class TodoWindow(QWidget):
                 except ValueError:
                     details.append(due)
         details.append(priority)
+        details.append(category)
         if reminder:
             details.append(f"⏰ {reminder}")
 
@@ -364,6 +404,7 @@ class TodoWindow(QWidget):
             "due_date": due,
             "reminder": reminder,
             "notified": False,
+            "category": self.category.currentText(),
         })
         self.input.clear()
         self.save()
