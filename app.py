@@ -79,6 +79,27 @@ class TodoWindow(QWidget):
             self.move(screen.right() - self.width() - 28, screen.top() + 80)
 
         self.build()
+        self.mini_button = QPushButton("✓", self)
+        self.mini_button.setFixedSize(56, 56)
+        self.mini_button.setToolTip("Restore Sticky Todo")
+        self.mini_button.setStyleSheet(
+            """
+            QPushButton {
+                background: #17191f;
+                color: #7c83ff;
+                border: 2px solid #343842;
+                border-radius: 28px;
+                font-size: 22px;
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                background: #22252d;
+                border-color: #5965ff;
+            }
+            """
+        )
+        self.mini_button.clicked.connect(self.restore_from_mini)
+        self.mini_button.hide()
         self.apply_opacity()
         self.render()
 
@@ -126,6 +147,25 @@ class TodoWindow(QWidget):
         if ok and text.strip():
             self.input.setText(text.strip())
             self.add_task()
+
+    def minimize_to_icon(self):
+        """Collapse Sticky into a small floating desktop icon."""
+        if self.mini_button.isVisible():
+            return
+        self.card.hide()
+        self.mini_button.show()
+        self.resize(64, 64)
+        self.setMinimumSize(0, 0)
+        self.adjustSize()
+
+    def restore_from_mini(self):
+        """Restore the full Sticky Todo window from its desktop icon."""
+        self.mini_button.hide()
+        self.card.show()
+        self.resize(430, 570)
+        self.raise_()
+        self.activateWindow()
+        self.input.setFocus()
 
     def update_desktop_visibility(self):
         if not self.desktop_only:
@@ -213,7 +253,7 @@ class TodoWindow(QWidget):
         self.count.setStyleSheet("color:#9ca3af;")
         minimize = QPushButton("—")
         minimize.setFixedWidth(30)
-        minimize.clicked.connect(self.hide_from_desktop)
+        minimize.clicked.connect(self.minimize_to_icon)
         close = QPushButton("×")
         close.setFixedWidth(30)
         close.clicked.connect(self.hide_from_desktop)
